@@ -1,5 +1,6 @@
 .pio
 .idea
+.vscode
 /src/privates.h
 *.FCBak
 /data/public/
