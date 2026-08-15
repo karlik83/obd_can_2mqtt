@@ -15,17 +15,23 @@
  * 59 Temple Place - Suite 330, Boston, MA  02111-1307 USA
  */
 #pragma once
+#ifdef USE_CAN
+#include "obd_can.h"
+#else
 #ifdef USE_BLE
 #include <BLESerial.h>
 #else
 #include <BluetoothSerial.h>
+#endif
 #endif
 
 #include <bitset>
 #include <FS.h>
 #include <OBDStates.h>
 
+#ifndef USE_CAN
 #include "ELMduino.h"
+#endif
 
 // ELM327
 // https://cdn.sparkfun.com/assets/learn_tutorials/8/3/ELM327DS.pdf
@@ -85,10 +91,12 @@ public:
 };
 
 class OBDClass : public OBDStates {
+#ifndef USE_CAN
 #ifdef USE_BLE
     BLESerial serialBLE;
 #else
     BluetoothSerial serialBt;
+#endif
 #endif
     ELM327 elm327;
 
@@ -111,6 +119,7 @@ class OBDClass : public OBDStates {
 
     std::function<void()> connectErrorCallback = nullptr;
 
+#ifndef USE_CAN
 #ifdef USE_BLE
     std::function<void(BLEScanResultsSet *scanResult)> devDiscoveredCallback = nullptr;
 #else
@@ -127,6 +136,7 @@ class OBDClass : public OBDStates {
     static void onBLEDisconnect();
 
     BLEScanResultsSet *discoverBLEDevices();
+#endif
 #endif
 
     template<typename T>
@@ -170,10 +180,12 @@ public:
 
     bool resetDTCs();
 
+#ifndef USE_CAN
 #ifdef USE_BLE
     void onDevicesDiscovered(const std::function<void(BLEScanResultsSet *scanResult)> &callable);
 #else
     void onDevicesDiscovered(const std::function<void(BTScanResults *scanResult)> &callable);
+#endif
 #endif
 
     std::string getConnectedBTAddress() const;

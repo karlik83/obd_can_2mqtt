@@ -21,6 +21,10 @@
 #include <ExprParser.h>
 #include "helper.h"
 
+// Hinweis: "elm327" ist im USE_CAN-Build KEIN ELMduino-Objekt mehr, sondern
+// die kompatible CAN-Bridge aus obd_can.h/.cpp - alle Aufrufe unten
+// (currentDTCCodes(), nb_rx_state, DTC_Response, batteryVoltage(), ...)
+// funktionieren unveraendert, da die Klasse dieselbe Schnittstelle bietet.
 OBDClass::OBDClass() : OBDStates(&elm327), elm327() {
     protocol = AUTOMATIC;
 
@@ -407,7 +411,7 @@ void DTCs::clear() {
     v_codes.clear();
 }
 
-#ifndef USE_BLE
+#if !defined(USE_BLE) && !defined(USE_CAN)
 void OBDClass::BTEvent(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
     if (event == ESP_SPP_CLOSE_EVT) {
         Serial.println("Bluetooth disconnected.");
@@ -487,15 +491,20 @@ void OBDClass::begin(const String &devName, const String &devMac, const char pro
     this->debug = debug;
     this->specifyNumResponses = specifyNumResponses;
     stopConnect = false;
+#ifndef USE_CAN
 #ifdef USE_BLE
     serialBLE.onDisconnect(onBLEDisconnect);
 #else
     serialBt.register_callback(BTEvent);
 #endif
+#endif
 }
 
 void OBDClass::end() {
     stopConnect = true;
+#ifdef USE_CAN
+    elm327.end();
+#else
 #ifdef USE_BLE
     serialBLE.disconnect();
     serialBLE.end();
@@ -503,8 +512,52 @@ void OBDClass::end() {
     serialBt.disconnect();
     serialBt.end();
 #endif
+#endif
 }
 
+#ifdef USE_CAN
+void OBDClass::connect(bool reconnect) {
+    stopConnect = false;
+
+    if (stopConnect || (reconnect && !initDone)) {
+        return;
+    }
+
+    // Kein Geraete-Pairing wie bei Bluetooth noetig - einfach den TWAI-
+    // Treiber (neu) starten. Bei Fehlschlag mit Backoff erneut versuchen.
+    int retryCount = 0;
+    while (!elm327.begin() && retryCount < 3) {
+        Serial.println("Couldn't start CAN interface - retrying");
+        delay(BT_DISCOVER_TIME);
+        retryCount++;
+    }
+
+    if (!elm327.connected) {
+        delay(BT_DISCOVER_TIME);
+        Serial.println("Restarting OBD (CAN) connect.");
+        elm327.end();
+        if (connectErrorCallback) {
+            connectErrorCallback();
+        }
+        if (!stopConnect) {
+            connect(reconnect);
+        }
+        return;
+    }
+
+    Serial.println("Connected to CAN bus");
+
+    if (connectedCallback) {
+        connectedCallback();
+    }
+
+    if (!reconnect) {
+        setCheckPidSupport(this->checkPidSupport);
+        elm327.specifyNumResponses = this->specifyNumResponses;
+        initDone = true;
+    }
+}
+#else
 void OBDClass::connect(bool reconnect) {
     stopConnect = false;
 
@@ -694,9 +747,12 @@ connect:
         initDone = true;
     }
 }
+#endif
 
 void OBDClass::loop() {
-#ifdef USE_BLE
+#ifdef USE_CAN
+    if (!stopConnect && elm327.connected) {
+#elif defined(USE_BLE)
     if (!stopConnect && serialBLE && !serialBLE.isClosed()) {
 #else
     if (!stopConnect && serialBt && !serialBt.isClosed()) {
@@ -741,6 +797,7 @@ bool OBDClass::resetDTCs() {
     return elm327.resetDTC();
 }
 
+#ifndef USE_CAN
 #ifdef USE_BLE
 void OBDClass::onDevicesDiscovered(const std::function<void(BLEScanResultsSet * scanResult)> &callable) {
     devDiscoveredCallback = callable;
@@ -749,6 +806,7 @@ void OBDClass::onDevicesDiscovered(const std::function<void(BLEScanResultsSet * 
 void OBDClass::onDevicesDiscovered(const std::function<void(BTScanResults *scanResult)> &callable) {
     devDiscoveredCallback = callable;
 }
+#endif
 #endif
 
 std::string OBDClass::getConnectedBTAddress() const {

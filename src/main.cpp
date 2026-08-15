@@ -381,6 +381,7 @@ void onOBDConnectError() {
 #endif
 }
 
+#ifndef USE_CAN
 #ifdef USE_BLE
 void onBLEDevicesDiscovered(BLEScanResultsSet *btDeviceList) {
     JsonDocument devices;
@@ -428,6 +429,7 @@ void onBTDevicesDiscovered(BTScanResults *btDeviceList) {
 
     file.close();
 }
+#endif
 #endif
 
 bool sendDiscoveryData() {
@@ -968,10 +970,12 @@ void startOutputTask(const char *id) {
 
 void startReadTask() {
     if (!Settings.OBD2.getDisable()) {
+#ifndef USE_CAN
 #ifdef USE_BLE
         OBD.onDevicesDiscovered(onBLEDevicesDiscovered);
 #else
         OBD.onDevicesDiscovered(onBTDevicesDiscovered);
+#endif
 #endif
         OBD.connect();
 

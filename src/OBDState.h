@@ -16,7 +16,11 @@
  */
 
 #pragma once
+#ifdef USE_CAN
+#include "obd_can.h"
+#else
 #include <ELMduino.h>
+#endif
 #include <functional>
 #include <map>
 #include <ArduinoJson.h>
