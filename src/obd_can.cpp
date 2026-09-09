@@ -14,6 +14,10 @@
  * If not, write to the Free Software Foundation Inc.,
  * 59 Temple Place - Suite 330, Boston, MA  02111-1307 USA
  */
+// Nur im nativen CAN-Build uebersetzen. Sonst kollidiert die hier definierte
+// ELM327-Klasse beim Linken mit der gleichnamigen Klasse aus der ELMduino-Lib.
+#ifdef USE_CAN
+
 #include "obd_can.h"
 
 ELM327::ELM327() {
@@ -307,3 +311,5 @@ double ELM327::batteryVoltage() {
     const double raw = processPID(0x01, 0x42, 1, 2, 1, 0);
     return raw / 1000.0;
 }
+
+#endif // USE_CAN

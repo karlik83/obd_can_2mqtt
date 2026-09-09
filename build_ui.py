@@ -23,6 +23,30 @@ Import("env")
 # Install custom packages from the PyPi registry
 env.Execute("$PYTHONEXE -m pip install intelhex")
 
+
+def gitOutput(*args, default=""):
+    try:
+        result = run(["git", *args], capture_output=True, text=True, check=True)
+        return result.stdout.strip() or default
+    except Exception:
+        return default
+
+
+def addGitBuildFlags(env):
+    # Replaces the former "!echo ... $(git ...)" build_flags, which only worked
+    # in a POSIX shell and broke the build on Windows (cmd.exe).
+    branch = (os.environ.get("RELEASE_VERSION")
+              or gitOutput("symbolic-ref", "-q", "--short", "HEAD")
+              or gitOutput("describe", "--tags", "--exact-match", default="unknown"))
+    commit = gitOutput("log", "-1", "--pretty=%h", default="unknown")
+    env.Append(CPPDEFINES=[
+        ("BUILD_GIT_BRANCH", '\\"%s\\"' % branch),
+        ("BUILD_GIT_COMMIT_HASH", '\\"%s\\"' % commit),
+    ])
+
+
+addGitBuildFlags(env)
+
 def writeUIConfiguration(env):
     confJson = "./data/public/configuration.json"
     if os.path.exists(confJson):
