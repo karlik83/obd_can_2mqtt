@@ -108,6 +108,28 @@ bool ELM327::begin(gpio_num_t txPin, gpio_num_t rxPin, bool debugEnabled, uint32
     elm_port = reinterpret_cast<void *>(0x1);
 
     Serial.println("obd_can: TWAI (CAN) driver started");
+
+#ifdef OBD_CAN_UDS_SELFTEST
+    // One-shot check of the physically addressed UDS (service 0x22) path against
+    // tools/fake-ecu. Build with -DOBD_CAN_UDS_SELFTEST (add -DOBD_CAN_DEBUG for
+    // the raw frame log). Not for production images.
+    delay(300);
+    struct { const char *sh; uint8_t svc; uint16_t did; uint8_t bytes; const char *what; } tests[] = {
+        {"AT SH 7E0", 0x22, 0x1164, 2, "displayed SoC /100 %"},
+        {"AT SH 7E5", 0x22, 0x028C, 1, "gross SoC %"},
+        {"AT SH 7E5", 0x22, 0x1E3B, 2, "pack voltage /10 V"},
+        {"AT SH 7E5", 0x22, 0x1E3D, 2, "pack current *0.1 A (INT16)"},
+        {"AT SH 7E5", 0x22, 0x1E0C, 7, "cell temps A-40 (multi-frame)"},
+    };
+    for (auto &t : tests) {
+        sendCommand_Blocking(t.sh);
+        const double v = processPID(t.svc, t.did, 1, t.bytes);
+        Serial.printf("obd_can: UDS %s %04X -> state=%d value=%.2f payload=%s  (%s)\n",
+                      t.sh, t.did, (int) nb_rx_state, v, payload, t.what);
+    }
+    sendCommand_Blocking("AT D");
+#endif
+
     return true;
 }
 
@@ -156,7 +178,17 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
         Serial.println("]");
 #endif
 
-        if (message.identifier < OBD_CAN_RESPONSE_ID_MIN || message.identifier > OBD_CAN_RESPONSE_ID_MAX) {
+        // Functional broadcast (0x7DF): responses come back on 0x7E8..0x7EF.
+        // Physical addressing ("AT SH", UDS): the response ID is ECU/gateway
+        // specific and does not follow a single convention (e.g. VAG: 0x7E5 ->
+        // 0x7ED but 0x710 -> 0x77A). Accept the whole diagnostic window and let
+        // the service/DID echo check in requestPID() do the real filtering.
+        const bool idOk = (activeReqId == OBD_CAN_REQUEST_ID)
+                              ? (message.identifier >= OBD_CAN_RESPONSE_ID_MIN &&
+                                 message.identifier <= OBD_CAN_RESPONSE_ID_MAX)
+                              : (message.identifier >= 0x700 && message.identifier <= 0x7FF &&
+                                 message.identifier != activeReqId);
+        if (!idOk) {
             continue; // not relevant bus traffic
         }
 
@@ -189,10 +221,14 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
             expectedSeq = 1;
             responseId = message.identifier;
 
-            // Send a Flow Control frame to the matching request ID of the
-            // responding ECU (response ID - 8 == its request ID).
+            // Send a Flow Control frame to the responding ECU. For a functional
+            // request that is (response ID - 8); for a physically addressed one
+            // it is the request ID we used.
+            const uint32_t fcTarget = (activeReqId == OBD_CAN_REQUEST_ID)
+                                          ? (message.identifier - 8)
+                                          : activeReqId;
             const uint8_t fc[8] = {0x30, 0x00, 0x00, 0, 0, 0, 0, 0};
-            sendFrame(message.identifier - 8, fc, 3);
+            sendFrame(fcTarget, fc, 3);
             continue;
         }
 
@@ -221,14 +257,35 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
     return false; // timeout
 }
 
+// UDS "ReadDataByIdentifier" (0x22) and any PID > 0xFF carry a 2-byte DID;
+// standard modes (01/02/09 ...) carry a single PID byte.
+static inline bool obdCanTwoByteDid(const uint8_t service, const uint16_t pid) {
+    return service == 0x22 || pid > 0xFF;
+}
+
 bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outData, uint8_t &outLen) {
     // Mode/service requests with one PID byte (the standard case for mode 01,
-    // 02, 09 ...). Service 0x03/0x04 (DTCs) use currentDTCCodes()/resetDTC().
-    const uint8_t request[8] = {
-        0x02, service, static_cast<uint8_t>(pid & 0xFF), 0, 0, 0, 0, 0
-    };
+    // 02, 09 ...) or a 2-byte DID (UDS service 0x22). Service 0x03/0x04 (DTCs)
+    // use currentDTCCodes()/resetDTC().
+    const bool twoByteDid = obdCanTwoByteDid(service, pid);
+    activeReqId = reqHeader != 0 ? reqHeader : OBD_CAN_REQUEST_ID;
 
-    if (!sendFrame(OBD_CAN_REQUEST_ID, request, 3)) {
+    uint8_t request[8] = {0};
+    uint8_t requestLen;
+    if (twoByteDid) {
+        request[0] = 0x03; // ISO-TP Single Frame, 3 data bytes
+        request[1] = service;
+        request[2] = (pid >> 8) & 0xFF;
+        request[3] = pid & 0xFF;
+        requestLen = 4;
+    } else {
+        request[0] = 0x02;
+        request[1] = service;
+        request[2] = pid & 0xFF;
+        requestLen = 3;
+    }
+
+    if (!sendFrame(activeReqId, request, requestLen)) {
         nb_rx_state = ELM_GENERAL_ERROR;
         return false;
     }
@@ -259,9 +316,20 @@ bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outD
     Serial.println("]");
 #endif
 
-    // Expected positive response: byte0 = service+0x40 (echo), byte1 = PID
-    if (rawLen < 2 || raw[0] != static_cast<uint8_t>(service + 0x40)) {
-        // byte0 == 0x7F means "Negative Response" (e.g. PID not supported)
+    // Expected positive response: byte0 = service + 0x40 (echo), then the echoed
+    // PID (1 byte) or DID (2 bytes).
+    const uint8_t echoLen = twoByteDid ? 3 : 2;
+    const bool didEcho = !twoByteDid ||
+                         (rawLen >= 3 && raw[1] == ((pid >> 8) & 0xFF) && raw[2] == (pid & 0xFF));
+    if (rawLen < echoLen || raw[0] != static_cast<uint8_t>(service + 0x40) || !didEcho) {
+#ifdef OBD_CAN_DEBUG
+        if (rawLen >= 3 && raw[0] == 0x7F) {
+            // Negative Response: raw[1] = requested service, raw[2] = NRC
+            // (0x11 serviceNotSupported, 0x31 requestOutOfRange, 0x7F/0x22
+            // serviceNotSupportedInActiveSession -> needs 10 03, ...).
+            Serial.printf("obd_can: NRC for %02X %04X -> 0x%02X\n", service, pid, raw[2]);
+        }
+#endif
         nb_rx_state = ELM_NO_DATA;
         return false;
     }
@@ -291,9 +359,13 @@ double ELM327::processPID(const uint8_t service, const uint16_t pid, const uint8
     }
     payload[pos] = '\0';
 
-    // The payload starts after the two echo bytes (service+0x40, PID)
-    const uint8_t *data = raw + 2;
-    const uint8_t dataLen = rawLen >= 2 ? rawLen - 2 : 0;
+    // The data starts after the echo bytes: service+0x40 plus the PID (1 byte)
+    // or DID (2 bytes). numExpectedBytes reads the value from this offset, big
+    // endian; fields at a deeper offset are extracted in a computed state via
+    // the expression byte accessor ($rawState.bN:M) on the full hex payload.
+    const uint8_t echoLen = obdCanTwoByteDid(service, pid) ? 3 : 2;
+    const uint8_t *data = raw + echoLen;
+    const uint8_t dataLen = rawLen >= echoLen ? rawLen - echoLen : 0;
     const uint8_t useLen = numExpectedBytes < dataLen ? numExpectedBytes : dataLen;
 
     uint32_t rawValue = 0;
@@ -306,11 +378,17 @@ double ELM327::processPID(const uint8_t service, const uint16_t pid, const uint8
 }
 
 elm_can_rxstate_t ELM327::sendCommand_Blocking(const char *cmd) {
-    // In CAN mode there are no more AT commands (setting headers etc.).
-    // OBDState.cpp only calls this for optional header configuration - just
-    // acknowledge success here so the existing flow (SET_HEADER /
-    // SET_ALL_TO_DEFAULTS) does not block.
-    (void) cmd;
+    // OBDState.cpp issues exactly two AT commands, formatted from the macros in
+    // obd_can.h: "AT SH <HEX>" before a request that carries pid.header, and
+    // "AT D" afterwards. Parse them so physically addressed UDS reads work; any
+    // other command is a harmless no-op.
+    if (cmd != nullptr) {
+        if (strncmp(cmd, "AT SH ", 6) == 0) {
+            reqHeader = strtoul(cmd + 6, nullptr, 16);
+        } else if (strcmp(cmd, "AT D") == 0) {
+            reqHeader = 0;
+        }
+    }
     strlcpy(payload, RESPONSE_OK, sizeof(payload));
     nb_rx_state = ELM_SUCCESS;
     return ELM_SUCCESS;
@@ -330,6 +408,7 @@ std::string ELM327::decodeDTC(const uint8_t b1, const uint8_t b2) {
 void ELM327::currentDTCCodes() {
     // Service 0x03: read stored DTCs (no PID byte needed)
     const uint8_t request[8] = {0x01, 0x03, 0, 0, 0, 0, 0, 0};
+    activeReqId = OBD_CAN_REQUEST_ID; // functional broadcast, standard response window
 
     DTC_Response.codesFound = 0;
 
@@ -365,6 +444,7 @@ void ELM327::currentDTCCodes() {
 bool ELM327::resetDTC() {
     // Service 0x04: clear all stored DTCs
     const uint8_t request[8] = {0x01, 0x04, 0, 0, 0, 0, 0, 0};
+    activeReqId = OBD_CAN_REQUEST_ID;
 
     if (!sendFrame(OBD_CAN_REQUEST_ID, request, 1)) {
         return false;

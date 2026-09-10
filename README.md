@@ -240,6 +240,34 @@ or with PID codes and value changes:
 }
 ```
 
+##### Manufacturer data (UDS / service 0x22)
+
+To read a manufacturer specific value (e.g. the HV battery data of an EV) set
+`pid.service` to `34` (0x22), `pid.pid` to the 2-byte DID and `pid.header` to
+the request ID of the target control unit. All three are **decimal**.
+
+```json
+"pid": {
+  "service": 34,
+  "pid": 7739,
+  "header": 2021,
+  "numResponses": 1,
+  "numExpectedBytes": 2,
+  "responseFormat": 2,
+  "scaleFactor": "0.1",
+  "bias": 0
+}
+```
+
+`pid` `7739` = DID 0x1E3B, `header` `2021` = ECU 0x7E5. `numExpectedBytes` reads
+the value from directly after the echoed DID, big endian; `responseFormat` `2`
+treats it as a signed 16-bit value. For a field at a deeper offset in the
+response, add a CALC state and slice the raw payload with `$rawState.b<from>:<to>`
+(the `to` index is exclusive). Works with the Bluetooth ELM327 adapter and, since
+the native CAN driver learned physical addressing + 16-bit DIDs, with `-DUSE_CAN`
+too. Data that needs an extended diagnostic session (`10 03`) is not yet
+supported.
+
 #### CALC
 
 The CALC state can be used to calculate a value based on other states.

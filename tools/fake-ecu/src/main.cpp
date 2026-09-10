@@ -17,6 +17,16 @@
  *   - Service 0x03 (read DTCs) -> returns 2 test trouble codes
  *   - Service 0x04 (clear DTCs) -> acknowledges with a positive response
  *
+ * EV / UDS simulation (exercises the physically addressed service 0x22 path):
+ *   - On 0x7E0 -> 0x7E8 (this ECU):
+ *       22 1164  displayed SoC        2 bytes, (A*256+B)/100  [%]
+ *       22 10E0  odometer             4 bytes, A              [km]
+ *   - On 0x7E5 -> 0x7ED (simulated e-Golf-style battery ECU "J840"):
+ *       22 028C  gross SoC            1 byte,  A              [%]
+ *       22 1E3B  HV pack voltage      2 bytes, (A*256+B)/10   [V]
+ *       22 1E3D  HV pack current      2 bytes, INT_16 * 0.1   [A]  (neg = discharge)
+ *       22 1E0C  cell temperatures    7 bytes, A-40 each [degC] -> MULTI-FRAME
+ *
  * WIRING (test board <-> obd2-mqtt board):
  *   test board CAN-H  <-> obd2-mqtt board CAN-H
  *   test board CAN-L  <-> obd2-mqtt board CAN-L
@@ -51,9 +61,14 @@
 #define FAKE_ECU_TIMING  TWAI_TIMING_CONFIG_125KBITS()
 #endif
 
-#define OBD_REQUEST_ID   0x7DF   // functional request from the tester
+#define OBD_REQUEST_ID    0x7DF  // functional request from the tester
 #define OBD_MY_REQUEST_ID 0x7E0  // "physical" request addressed to this ECU
-#define OBD_RESPONSE_ID  0x7E8   // response ID of this simulated ECU
+#define OBD_RESPONSE_ID   0x7E8  // response ID of this simulated ECU
+
+// Second simulated control unit: an e-Golf-style HV battery ECU, physically
+// addressed. Uses the +8 response convention (like the real e-Golf BMS).
+#define OBD_BMS_REQUEST_ID  0x7E5
+#define OBD_BMS_RESPONSE_ID 0x7ED
 
 // ---------------------------------------------------------------------
 // Simulated sensor values - they change slowly so that you can see in the
@@ -64,6 +79,14 @@ uint8_t  simSpeed = 0;       // km/h
 uint8_t  simCoolant = 70;    // deg C (OBD2 formula adds the +40 offset: A-40)
 uint8_t  simThrottle = 15;   // 0-100 % (scaled to 0-255)
 bool     simDirectionUp = true;
+
+// EV / HV battery simulation
+uint8_t  simSoc = 64;                 // %
+bool     simSocUp = false;
+uint32_t simOdometer = 42123;         // km
+double   simPackVoltage = 355.0;      // V
+int16_t  simPackCurrent = -12;        // A (negative = discharge)
+int8_t   simCellTemp[7] = {21, 22, 22, 23, 22, 21, 24}; // deg C
 
 void updateSimValues() {
     // RPM sweeps between 800 and 3000
@@ -76,6 +99,16 @@ void updateSimValues() {
     }
     simSpeed = (simRpm - 800) / 40;         // rough coupling to RPM
     simThrottle = 15 + (simRpm - 800) / 30; // rough coupling as well
+
+    // SoC drifts slowly between 40 and 90 %
+    if (simSocUp) { if (++simSoc >= 90) simSocUp = false; }
+    else { if (--simSoc <= 40) simSocUp = true; }
+
+    // Pack voltage follows SoC; current tracks "load" (RPM), positive while the
+    // simulated SoC is rising ("charging").
+    simPackVoltage = 320.0 + simSoc * 0.9;
+    simPackCurrent = simSocUp ? 8 : static_cast<int16_t>(-(int) (simRpm - 800) / 20);
+    simOdometer += (simSpeed / 20); // rough, just so the value moves
 }
 
 // ---------------------------------------------------------------------
@@ -94,12 +127,12 @@ bool sendFrame(uint32_t id, const uint8_t *data, uint8_t len) {
 
 // Waits for a Flow Control frame (0x30) from the tester, e.g. after sending a
 // First Frame of a multi-frame response (VIN).
-bool waitForFlowControl(uint32_t timeoutMs) {
+bool waitForFlowControl(uint32_t reqId, uint32_t timeoutMs) {
     twai_message_t msg;
     uint32_t start = millis();
     while (millis() - start < timeoutMs) {
         if (twai_receive(&msg, pdMS_TO_TICKS(50)) == ESP_OK) {
-            if ((msg.identifier == OBD_MY_REQUEST_ID || msg.identifier == OBD_REQUEST_ID) &&
+            if ((msg.identifier == reqId || msg.identifier == OBD_REQUEST_ID) &&
                 msg.data_length_code > 0 && (msg.data[0] & 0xF0) == 0x30) {
                 return true;
             }
@@ -178,7 +211,7 @@ void handleVin() {
     sendFrame(OBD_RESPONSE_ID, ff, 8);
     Serial.println("-> VIN First Frame sent, waiting for Flow Control...");
 
-    if (!waitForFlowControl(500)) {
+    if (!waitForFlowControl(OBD_MY_REQUEST_ID, 500)) {
         Serial.println("   no Flow Control frame received - sending anyway (test mode)");
     }
 
@@ -195,6 +228,85 @@ void handleVin() {
         delay(10); // simulated Separation Time
     }
     Serial.println("-> VIN sent completely");
+}
+
+// ---------------------------------------------------------------------
+// Generic ISO-TP sender: single frame if it fits, else First Frame +
+// Consecutive Frames (waits for the tester's Flow Control).
+// ---------------------------------------------------------------------
+void sendIsoTp(uint32_t respId, uint32_t reqId, const uint8_t *data, uint8_t len) {
+    if (len <= 7) {
+        uint8_t sf[8] = {0};
+        sf[0] = len; // PCI: Single Frame, lower nibble = length
+        memcpy(&sf[1], data, len);
+        sendFrame(respId, sf, 1 + len);
+        return;
+    }
+
+    uint8_t ff[8];
+    ff[0] = 0x10 | ((len >> 8) & 0x0F);
+    ff[1] = len & 0xFF;
+    memcpy(&ff[2], data, 6);
+    sendFrame(respId, ff, 8);
+    if (!waitForFlowControl(reqId, 500)) {
+        Serial.println("   no Flow Control - sending CFs anyway (test mode)");
+    }
+
+    uint8_t sent = 6;
+    uint8_t seq = 1;
+    while (sent < len) {
+        uint8_t chunk = (len - sent) < 7 ? (len - sent) : 7;
+        uint8_t cf[8] = {0};
+        cf[0] = 0x20 | (seq & 0x0F);
+        memcpy(&cf[1], data + sent, chunk);
+        sendFrame(respId, cf, 1 + chunk);
+        sent += chunk;
+        seq++;
+        delay(10);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Service 0x22 - ReadDataByIdentifier (UDS). Physically addressed; the
+// DID is the 2 bytes after the service byte.
+// ---------------------------------------------------------------------
+void handleMode22(uint32_t reqId, uint16_t did) {
+    const uint32_t respId = (reqId == OBD_BMS_REQUEST_ID) ? OBD_BMS_RESPONSE_ID : OBD_RESPONSE_ID;
+
+    uint8_t p[16] = {0};
+    p[0] = 0x62;               // service 0x22 + 0x40
+    p[1] = (did >> 8) & 0xFF;  // echoed DID
+    p[2] = did & 0xFF;
+    uint8_t len = 3;
+
+    if (reqId == OBD_MY_REQUEST_ID && did == 0x1164) {          // displayed SoC
+        uint16_t raw = simSoc * 100;
+        p[3] = (raw >> 8) & 0xFF; p[4] = raw & 0xFF; len = 5;
+    } else if (reqId == OBD_MY_REQUEST_ID && did == 0x10E0) {   // odometer [km]
+        p[3] = (simOdometer >> 24) & 0xFF; p[4] = (simOdometer >> 16) & 0xFF;
+        p[5] = (simOdometer >> 8) & 0xFF;  p[6] = simOdometer & 0xFF; len = 7;
+    } else if (reqId == OBD_BMS_REQUEST_ID && did == 0x028C) {  // gross SoC [%]
+        p[3] = simSoc; len = 4;
+    } else if (reqId == OBD_BMS_REQUEST_ID && did == 0x1E3B) {  // pack voltage [V*10]
+        uint16_t raw = (uint16_t) (simPackVoltage * 10.0);
+        p[3] = (raw >> 8) & 0xFF; p[4] = raw & 0xFF; len = 5;
+    } else if (reqId == OBD_BMS_REQUEST_ID && did == 0x1E3D) {  // pack current [A*10, signed]
+        uint16_t raw = (uint16_t) (int16_t) (simPackCurrent * 10);
+        p[3] = (raw >> 8) & 0xFF; p[4] = raw & 0xFF; len = 5;
+    } else if (reqId == OBD_BMS_REQUEST_ID && did == 0x1E0C) {  // 7 cell temps, A-40 -> multi-frame
+        for (int i = 0; i < 7; i++) p[3 + i] = (uint8_t) (simCellTemp[i] + 40);
+        len = 3 + 7;
+    } else {
+        // Negative Response 0x7F <service> <NRC 0x31 requestOutOfRange>
+        uint8_t nr[4] = {0x03, 0x7F, 0x22, 0x31};
+        sendFrame(respId, nr, 4);
+        Serial.printf("-> Mode22 DID 0x%04X on 0x%03lX: NRC 0x31\n", did, (unsigned long) reqId);
+        return;
+    }
+
+    sendIsoTp(respId, reqId, p, len);
+    Serial.printf("-> Mode22 DID 0x%04X on 0x%03lX answered (%u bytes)\n",
+                  did, (unsigned long) reqId, len);
 }
 
 // ---------------------------------------------------------------------
@@ -290,7 +402,7 @@ void setup() {
         while (true) delay(1000);
     }
 
-    Serial.println("CAN bus ready, waiting for OBD2 requests (0x7DF/0x7E0)...");
+    Serial.println("CAN bus ready, waiting for OBD2 requests (0x7DF / 0x7E0 / 0x7E5)...");
 }
 
 unsigned long lastSimUpdate = 0;
@@ -336,10 +448,11 @@ void loop() {
     Serial.println("]");
 #endif
 
-    // Only react to functional (0x7DF) or directly addressed (0x7E0) requests -
-    // Flow Control frames (0x30) are handled separately in waitForFlowControl()
-    // and ignored here.
-    if (msg.identifier != OBD_REQUEST_ID && msg.identifier != OBD_MY_REQUEST_ID) {
+    // Only react to functional (0x7DF), the OBD ECU (0x7E0) or the simulated
+    // battery ECU (0x7E5). Flow Control frames (0x30) are handled separately in
+    // waitForFlowControl() and ignored here.
+    if (msg.identifier != OBD_REQUEST_ID && msg.identifier != OBD_MY_REQUEST_ID &&
+        msg.identifier != OBD_BMS_REQUEST_ID) {
         return;
     }
     if (msg.data_length_code < 3) {
@@ -349,8 +462,19 @@ void loop() {
         return; // Flow Control, does not belong here
     }
 
-    uint8_t service = msg.data[1];
-    uint8_t pid = msg.data[2];
+    const uint8_t service = msg.data[1];
+    const uint8_t pid = msg.data[2];
+
+    if (service == 0x22) {
+        const uint16_t did = (static_cast<uint16_t>(msg.data[2]) << 8) | msg.data[3];
+        handleMode22(msg.identifier, did);
+        return;
+    }
+
+    // Everything else is only answered on the functional / OBD-ECU address.
+    if (msg.identifier == OBD_BMS_REQUEST_ID) {
+        return;
+    }
 
     switch (service) {
         case 0x01:

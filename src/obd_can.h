@@ -113,9 +113,11 @@ public:
     double processPID(uint8_t service, uint16_t pid, uint8_t numResponses,
                        uint8_t numExpectedBytes, double scaleFactor = 1, double bias = 0);
 
-    // Called from OBDState.cpp for AT header commands. In CAN mode there are no
-    // more AT commands - so it always returns ELM_SUCCESS with an empty payload
-    // so the existing flow does not block.
+    // Called from OBDState.cpp for AT header commands. In CAN mode the only ones
+    // issued are "AT SH <hex>" (set the target ECU request ID, for UDS service
+    // 0x22 on a physically addressed control unit) and "AT D" (reset to the
+    // functional broadcast). Both are parsed here; anything else is a no-op.
+    // Always returns ELM_SUCCESS with an "OK" payload so the flow does not block.
     elm_can_rxstate_t sendCommand_Blocking(const char *cmd);
 
     // --- Diagnostic Trouble Codes (Service 0x03/0x04) ---
@@ -134,6 +136,16 @@ private:
     bool initialized = false;
     bool debug = false;
     uint32_t timeoutMs = OBD_CAN_RESPONSE_TIMEOUT_MS;
+
+    // Target ECU request ID set via "AT SH <hex>". 0 = functional broadcast
+    // (0x7DF). A non-zero value switches requestPID() to physical addressing and
+    // makes 16-bit DIDs (service 0x22) usable.
+    uint32_t reqHeader = 0;
+
+    // The request ID actually used by the request currently in flight - set by
+    // requestPID()/currentDTCCodes()/resetDTC() so receiveIsoTp() knows which
+    // response IDs to accept and where to send the Flow Control frame.
+    uint32_t activeReqId = OBD_CAN_REQUEST_ID;
 
     bool sendFrame(uint32_t id, const uint8_t *data, uint8_t len) const;
 

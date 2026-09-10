@@ -35,6 +35,25 @@ over the native USB port (USB-CDC, see `ARDUINO_USB_CDC_ON_BOOT=1` in `platformi
 | `-DFAKE_ECU_DEBUG` | 1 Hz heartbeat on `0x555` + TWAI status + raw frame log over Serial (off by default) |
 | `-DFAKE_ECU_NO_ACK` | `TWAI_MODE_NO_ACK` – receives but does not acknowledge (bus diagnostics) |
 
+## Simulated ECUs
+
+| Request ID | Response ID | What it answers |
+|---|---|---|
+| `0x7DF` / `0x7E0` | `0x7E8` | service 0x01 (RPM, speed, coolant, throttle, ctrl-module voltage), 0x09/0x02 (VIN, multi-frame), 0x03/0x04 (DTCs); service 0x22 DIDs `1164` (displayed SoC), `10E0` (odometer) |
+| `0x7E5` | `0x7ED` | e-Golf-style HV battery ECU – service 0x22 DIDs `028C` (gross SoC), `1E3B` (pack voltage), `1E3D` (pack current, signed), `1E0C` (7 cell temps, multi-frame) |
+
+This exercises the physically addressed UDS path in `src/obd_can.cpp` (header
+via `AT SH`, 16-bit DIDs, non-`+8` response IDs, ISO-TP reassembly for the
+Flow-Control direction).
+
+To let the main firmware run a one-shot check of all of the above at boot, build
+it with `-DOBD_CAN_UDS_SELFTEST` (add `-DOBD_CAN_DEBUG` for the raw frame log):
+
+```
+PLATFORMIO_BUILD_FLAGS="-DOBD_CAN_UDS_SELFTEST -DOBD_CAN_DEBUG" \
+  pio run -e T-Call-A7670X-V1-0_CAN -t upload --upload-port COM6
+```
+
 The one-shot CAN **self-test** at boot (loopback through the transceiver) always
 runs and reports `SELFTEST: OK` or `SELFTEST: FAILED`.
 
