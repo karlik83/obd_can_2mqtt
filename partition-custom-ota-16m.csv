@@ -1,7 +1,13 @@
 # Name,   Type, SubType, Offset,  Size, Flags
+# app0/app1 shrunk by 128K each to make room for "cfg" - a small filesystem
+# holding /settings.json and /states.json so `pio run -t uploadfs` (which only
+# rewrites "spiffs", the UI) no longer wipes the device configuration.
+# "spiffs" and "coredump" keep their offset/size, so existing config survives
+# the upgrade and is migrated into "cfg" on first boot (see src/config_fs.cpp).
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
-app0,     app,  ota_0,   0x10000, 0x3C0000,
-app1,     app,  ota_1,   0x3D0000,0x3C0000,
+app0,     app,  ota_0,   0x10000, 0x3A0000,
+app1,     app,  ota_1,   0x3B0000,0x3A0000,
+cfg,      data, 0x40,    0x750000,0x40000,
 spiffs,   data, spiffs,  0x790000,0x60000,
 coredump, data, coredump,0x7F0000,0x10000,

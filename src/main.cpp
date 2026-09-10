@@ -63,6 +63,7 @@
 #include "gsm.h"
 #include "http.h"
 #include "livedata_page.h"
+#include "config_fs.h"
 
 HTTPServer server(80);
 
@@ -257,7 +258,7 @@ void startHttpServer() {
                     if (index + len == total) {
                         auto json = std::string(static_cast<const char *>(request->_tempObject), total);
                         if (Settings.parseJson(json)) {
-                            if (Settings.writeSettings(LittleFS)) {
+                            if (Settings.writeSettings(configFs())) {
                                 request->send(200);
                             }
                         } else {
@@ -299,7 +300,7 @@ void startHttpServer() {
                             delay(5);
                         }
 
-                        const bool ok = OBD.parseJSON(json) && OBD.writeStates(LittleFS);
+                        const bool ok = OBD.parseJSON(json) && OBD.writeStates(configFs());
 
                         pauseOBD = false;
 
@@ -1103,6 +1104,7 @@ void setup() {
         log_d("LittleFS Mount Failed");
         return;
     }
+    initConfigFs();
 
     // init the coprozessor
     GSM::ulpInit();
@@ -1110,8 +1112,8 @@ void setup() {
     // init battery if needed
     GSM::initBattery();
 
-    Settings.readSettings(LittleFS);
-    OBD.readStates(LittleFS);
+    Settings.readSettings(configFs());
+    OBD.readStates(configFs());
 
     // disable Watch Dog for Core 0 - should fix crashes
     disableCore0WDT();

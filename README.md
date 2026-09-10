@@ -73,17 +73,17 @@ Build and upload firmware.bin to device
 pio run --target upload -e T-Call-A7670X-V1-0
 ```
 
-Build and upload littlefs.bin to device
+Build and upload littlefs.bin to device (the web UI)
 
 ```bash
-# connect to AP and save current settings
-curl http://192.168.4.1/api/settings -o settings.json
-
 pio run --target uploadfs -e T-Call-A7670X-V1-0
-
-# after reboot connect to AP
-curl -X PUT -H "Content-Type: application/json" -d @settings.json http://192.168.4.1/api/settings
 ```
+
+`settings.json` and `states.json` live on their own `cfg` partition, so
+`uploadfs` no longer overwrites the device configuration. When upgrading from a
+firmware built before the `cfg` partition existed, flash the firmware first
+(`pio run -t upload`) - on the next boot the existing config is migrated from the
+old partition automatically, no reset needed.
 
 ## Settings
 

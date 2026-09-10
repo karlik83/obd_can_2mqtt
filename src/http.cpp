@@ -17,6 +17,7 @@
 #include "http.h"
 #include <LittleFS.h>
 #include <obd.h>
+#include "config_fs.h"
 
 #if OTA_ENABLED
 #include <ota.h>
@@ -77,13 +78,13 @@ void HTTPServer::init(fs::FS &fs) {
             Serial.printf("...progress current: %u bytes, Final: %u bytes\n", current, final);
         }
     });
-    OTA.onEnd([&fs](bool success) {
+    OTA.onEnd([](bool success) {
         if (success) {
             Serial.println("...write settings");
-            Settings.writeSettings(fs);
+            Settings.writeSettings(configFs());
             Serial.println("...done");
             Serial.println("...write states");
-            OBD.writeStates(fs);
+            OBD.writeStates(configFs());
             Serial.println("...done");
         } else {
             Serial.println("...failed");
