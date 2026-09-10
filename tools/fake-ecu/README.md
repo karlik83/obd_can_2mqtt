@@ -6,11 +6,16 @@ werden kann.
 
 ## Hardware
 
-- 2. Board: LilyGO **T7-S3** (ESP32-S3-WROOM-1-N16R8) + **SN65HVD230** CAN-Transceiver
+- 2. Board: LilyGO **T7-S3** (ESP32-S3-WROOM-1-N16R8) + CAN-Transceiver
 - CAN-Pins auf dem Testboard: **TX = GPIO13**, **RX = GPIO14** (in `src/main.cpp`)
 - Verkabelung zum obd_can_2mqtt-Board:
   - CAN-H ↔ CAN-H, CAN-L ↔ CAN-L, **GND ↔ GND**
-  - je **120 Ω** zwischen CAN-H/CAN-L an **beiden** Leitungsenden
+  - **120 Ω** zwischen CAN-H/CAN-L an **beiden** Enden → Multimeter über den Bus misst ~60 Ω
+
+> **Transceiver:** die billigen **CJMCU-230** funktionieren erfahrungsgemäß nicht
+> zuverlässig (schwacher Treiber, "nur Empfang"). Getestet und gut:
+> **Waveshare "SN65HVD230 CAN Board"** (Terminierungs-Jumper an Bord, Rs korrekt).
+> Board `CAN_TX` → ESP-TX-GPIO, `CAN_RX` → ESP-RX-GPIO.
 
 ## Bauen & Flashen
 
@@ -19,8 +24,19 @@ pio run -e fake-ecu -t upload --upload-port COM5
 pio device monitor -e fake-ecu -p COM5        # Log ansehen, dann Reset druecken
 ```
 
-Der Log (`=== Fake-ECU startet ===`, `CAN-Bus bereit ...`) laeuft ueber den
-nativen USB-Port (USB-CDC, siehe `ARDUINO_USB_CDC_ON_BOOT=1` in `platformio.ini`).
+Der Log (`=== Fake-ECU startet ===`, `SELBSTTEST: ...`, `CAN-Bus bereit ...`) laeuft
+ueber den nativen USB-Port (USB-CDC, siehe `ARDUINO_USB_CDC_ON_BOOT=1` in `platformio.ini`).
+
+### Build-Flags (optional)
+
+| Flag | Wirkung |
+|---|---|
+| `-DFAKE_ECU_BITRATE_KBPS=125\|250\|500` | Bus-Bitrate (Default 500), muss zu `OBD_CAN_BITRATE_KBPS` des Testpartners passen |
+| `-DFAKE_ECU_DEBUG` | 1-Hz-Heartbeat auf `0x555` + TWAI-Status + Roh-Frame-Log über Serial (Default aus) |
+| `-DFAKE_ECU_NO_ACK` | `TWAI_MODE_NO_ACK` – empfängt, bestätigt aber nicht (Bus-Diagnose) |
+
+Der einmalige CAN-**Selbsttest** beim Boot (Loopback über den Transceiver) läuft
+immer und meldet `SELBSTTEST: OK` bzw. `FEHLGESCHLAGEN`.
 
 ## Was simuliert wird
 

@@ -32,6 +32,22 @@
 #define OBD_CAN_USE_EXTENDED_ID  0
 #endif
 
+// Bus-Bitrate in kBit/s. ISO 15765-4 kennt 250 und 500; nahezu alle PKW nutzen
+// 500. 125 nur als Diagnose-Hilfe bei zickiger Verkabelung (langsamere Flanken).
+#ifndef OBD_CAN_BITRATE_KBPS
+#define OBD_CAN_BITRATE_KBPS     500
+#endif
+
+#if OBD_CAN_BITRATE_KBPS == 500
+#define OBD_CAN_TIMING_CONFIG    TWAI_TIMING_CONFIG_500KBITS()
+#elif OBD_CAN_BITRATE_KBPS == 250
+#define OBD_CAN_TIMING_CONFIG    TWAI_TIMING_CONFIG_250KBITS()
+#elif OBD_CAN_BITRATE_KBPS == 125
+#define OBD_CAN_TIMING_CONFIG    TWAI_TIMING_CONFIG_125KBITS()
+#else
+#error "OBD_CAN_BITRATE_KBPS: nur 125, 250 oder 500 unterstuetzt"
+#endif
+
 // Standard-OBD2-Adressierung (ISO 15765-4)
 #define OBD_CAN_REQUEST_ID       0x7DF   // funktionale Anfrage (Broadcast an alle ECUs)
 #define OBD_CAN_RESPONSE_ID_MIN  0x7E8   // erste moegliche ECU-Antwort-ID

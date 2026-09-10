@@ -24,12 +24,63 @@ ELM327::ELM327() {
     memset(payload, 0, sizeof(payload));
 }
 
+#ifdef OBD_CAN_DEBUG
+// Lokaler Loopback-Selbsttest: im NO_ACK-Modus einen Frame mit Self-Reception
+// senden. Er laeuft ESP-TX -> Transceiver -> CANH/CANL -> Transceiver -> ESP-RX.
+// Kommt er zurueck, ist die lokale CAN-Hardware (Pins, Transceiver, Rs, Power)
+// in Ordnung.
+static void obdCanSelfTest(gpio_num_t txPin, gpio_num_t rxPin) {
+    twai_stop();
+    twai_driver_uninstall();
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NO_ACK);
+    twai_timing_config_t t = OBD_CAN_TIMING_CONFIG;
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    if (twai_driver_install(&g, &t, &f) != ESP_OK || twai_start() != ESP_OK) {
+        Serial.println("obd_can: SELFTEST driver init failed");
+        return;
+    }
+    twai_message_t tx = {};
+    tx.identifier = 0x2CD;
+    tx.self = 1;
+    tx.data_length_code = 3;
+    tx.data[0] = 0xBE; tx.data[1] = 0xEF; tx.data[2] = 0x01;
+    bool got = false;
+    if (twai_transmit(&tx, pdMS_TO_TICKS(50)) == ESP_OK) {
+        twai_message_t rx;
+        const uint32_t end = millis() + 200;
+        while (millis() < end) {
+            if (twai_receive(&rx, pdMS_TO_TICKS(20)) == ESP_OK && rx.identifier == 0x2CD) { got = true; break; }
+        }
+    }
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    Serial.printf("obd_can: SELFTEST %s (busErr=%lu txErr=%lu)\n",
+                  got ? "OK - lokale CAN-HW funktioniert" : "FAILED - Transceiver/Rs/Power/Pins pruefen",
+                  (unsigned long) st.bus_error_count, (unsigned long) st.tx_error_counter);
+    twai_stop();
+    twai_driver_uninstall();
+}
+#endif
+
 bool ELM327::begin(gpio_num_t txPin, gpio_num_t rxPin, bool debugEnabled, uint32_t responseTimeoutMs) {
     this->debug = debugEnabled;
     this->timeoutMs = responseTimeoutMs;
 
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NORMAL);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+#ifdef OBD_CAN_DEBUG
+    obdCanSelfTest(txPin, rxPin);
+#endif
+
+    // OBD_CAN_LISTEN_TEST: NO_ACK-Modus - der Controller bestaetigt empfangene
+    // Frames NICHT, empfaengt sie aber weiterhin. Zusammen mit OBD_CAN_DEBUG
+    // (Roh-Frame-Log in receiveIsoTp) laesst sich so pruefen, ob Frames der
+    // Gegenstelle physisch ankommen, unabhaengig vom ACK-Handshake.
+#ifdef OBD_CAN_LISTEN_TEST
+    const twai_mode_t canMode = TWAI_MODE_NO_ACK;
+#else
+    const twai_mode_t canMode = TWAI_MODE_NORMAL;
+#endif
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, canMode);
+    twai_timing_config_t t_config = OBD_CAN_TIMING_CONFIG;
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     // Falls von einem vorherigen (fehlgeschlagenen) begin() noch ein Treiber
@@ -99,6 +150,12 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
         if (twai_receive(&message, pdMS_TO_TICKS(remaining < 20 ? 20 : remaining)) != ESP_OK) {
             continue;
         }
+
+#ifdef OBD_CAN_DEBUG
+        Serial.printf("obd_can: RX id %03lX [", static_cast<unsigned long>(message.identifier));
+        for (int i = 0; i < message.data_length_code; i++) Serial.printf("%02X ", message.data[i]);
+        Serial.println("]");
+#endif
 
         if (message.identifier < OBD_CAN_RESPONSE_ID_MIN || message.identifier > OBD_CAN_RESPONSE_ID_MAX) {
             continue; // nicht relevanter Bus-Traffic
@@ -182,9 +239,26 @@ bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outD
     uint8_t rawLen = 0;
 
     if (!receiveIsoTp(responseId, raw, rawLen)) {
+#ifdef OBD_CAN_DEBUG
+        twai_status_info_t st{};
+        twai_get_status_info(&st);
+        Serial.printf("obd_can: req %02X %02X -> TIMEOUT  [state=%d txq=%lu rxq=%lu txErr=%lu rxErr=%lu txFail=%lu arbLost=%lu busErr=%lu]\n",
+                      service, pid & 0xFF, (int) st.state,
+                      (unsigned long) st.msgs_to_tx, (unsigned long) st.msgs_to_rx,
+                      (unsigned long) st.tx_error_counter, (unsigned long) st.rx_error_counter,
+                      (unsigned long) st.tx_failed_count, (unsigned long) st.arb_lost_count,
+                      (unsigned long) st.bus_error_count);
+#endif
         nb_rx_state = ELM_TIMEOUT;
         return false;
     }
+
+#ifdef OBD_CAN_DEBUG
+    Serial.printf("obd_can: req %02X %02X -> id %03lX [", service, pid & 0xFF,
+                  static_cast<unsigned long>(responseId));
+    for (uint8_t i = 0; i < rawLen; i++) Serial.printf("%02X ", raw[i]);
+    Serial.println("]");
+#endif
 
     // Erwartete positive Antwort: Byte0 = service+0x40 (Echo), Byte1 = PID
     if (rawLen < 2 || raw[0] != static_cast<uint8_t>(service + 0x40)) {

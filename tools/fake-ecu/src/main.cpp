@@ -37,6 +37,19 @@
 #define CAN_TX_PIN   GPIO_NUM_13
 #define CAN_RX_PIN   GPIO_NUM_14
 
+// Bus-Bitrate muss zum Testpartner (obd_can_config.h: OBD_CAN_BITRATE_KBPS)
+// passen. 500 = normal, 125 nur zur Verkabelungs-Diagnose.
+#ifndef FAKE_ECU_BITRATE_KBPS
+#define FAKE_ECU_BITRATE_KBPS  500
+#endif
+#if FAKE_ECU_BITRATE_KBPS == 500
+#define FAKE_ECU_TIMING  TWAI_TIMING_CONFIG_500KBITS()
+#elif FAKE_ECU_BITRATE_KBPS == 250
+#define FAKE_ECU_TIMING  TWAI_TIMING_CONFIG_250KBITS()
+#elif FAKE_ECU_BITRATE_KBPS == 125
+#define FAKE_ECU_TIMING  TWAI_TIMING_CONFIG_125KBITS()
+#endif
+
 #define OBD_REQUEST_ID   0x7DF   // funktionale Anfrage vom Tester
 #define OBD_MY_REQUEST_ID 0x7E0  // "physische" Anfrage direkt an diese ECU
 #define OBD_RESPONSE_ID  0x7E8   // Antwort-ID dieser simulierten ECU
@@ -206,13 +219,65 @@ void handleMode04() {
 // ---------------------------------------------------------------------
 // Setup / Loop
 // ---------------------------------------------------------------------
+// Einmaliger CAN-Selbsttest: im NO_ACK-Modus einen Frame mit Self-Reception
+// senden. Er laeuft ESP-TX -> Transceiver -> CANH/CANL -> Transceiver -> ESP-RX.
+// Kommt er zurueck, ist die lokale CAN-Hardware (Pins, Transceiver, Rs, Power)
+// in Ordnung und das Problem liegt in der Verbindung zwischen den Boards.
+int selfTestResult = -1; // -1 = nicht gelaufen, 0 = fail, 1 = ok
+
+static void canSelfTest() {
+    twai_driver_uninstall();
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NO_ACK);
+    twai_timing_config_t t = FAKE_ECU_TIMING;
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    if (twai_driver_install(&g, &t, &f) != ESP_OK || twai_start() != ESP_OK) {
+        Serial.println("SELBSTTEST: Treiber-Init fehlgeschlagen");
+        return;
+    }
+
+    twai_message_t tx = {};
+    tx.identifier = 0x1AB;
+    tx.self = 1; // Self-Reception Request
+    tx.data_length_code = 3;
+    tx.data[0] = 0xDE; tx.data[1] = 0xAD; tx.data[2] = 0xBE;
+
+    bool got = false;
+    if (twai_transmit(&tx, pdMS_TO_TICKS(50)) == ESP_OK) {
+        twai_message_t rx;
+        const uint32_t end = millis() + 200;
+        while (millis() < end) {
+            if (twai_receive(&rx, pdMS_TO_TICKS(20)) == ESP_OK && rx.identifier == 0x1AB) {
+                got = true;
+                break;
+            }
+        }
+    }
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    selfTestResult = got ? 1 : 0;
+    Serial.printf("SELBSTTEST: %s  (busErr=%lu txErr=%lu)\n",
+                  got ? "OK - lokale CAN-HW funktioniert, Problem in der Board-zu-Board-Leitung"
+                      : "FEHLGESCHLAGEN - Transceiver/Verdrahtung/Rs/Power am DIESEM Board pruefen",
+                  (unsigned long) st.bus_error_count, (unsigned long) st.tx_error_counter);
+
+    twai_stop();
+    twai_driver_uninstall();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("=== Fake-ECU startet ===");
 
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+    canSelfTest();
+
+#ifdef FAKE_ECU_NO_ACK
+    const twai_mode_t canMode = TWAI_MODE_NO_ACK; // empfaengt, bestaetigt aber nicht
+#else
+    const twai_mode_t canMode = TWAI_MODE_NORMAL;
+#endif
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, canMode);
+    twai_timing_config_t t_config = FAKE_ECU_TIMING;
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK) {
@@ -228,6 +293,10 @@ void setup() {
 }
 
 unsigned long lastSimUpdate = 0;
+uint32_t rxCount = 0;
+#ifdef FAKE_ECU_DEBUG
+unsigned long lastHeartbeat = 0;
+#endif
 
 void loop() {
     // Simulierte Werte alle 500ms weiterlaufen lassen
@@ -236,10 +305,35 @@ void loop() {
         lastSimUpdate = millis();
     }
 
+#ifdef FAKE_ECU_DEBUG
+    // Heartbeat (1 Hz Frame auf 0x555) + TWAI-Status ueber Serial - zeigt dem
+    // Testpartner, dass diese ECU am Bus lebt, und hilft bei Verkabelungsfehlern.
+    // Standardmaessig aus, damit die simulierte ECU sich "sauber" verhaelt.
+    if (millis() - lastHeartbeat > 1000) {
+        lastHeartbeat = millis();
+        twai_status_info_t st{};
+        twai_get_status_info(&st);
+        const uint8_t hb[8] = {0xAA, 0x55, (uint8_t) (millis() / 1000), 0, 0, 0, 0, 0};
+        const bool ok = sendFrame(0x555, hb, 3);
+        Serial.printf("hb: selftest=%s tx=%s rx=%lu state=%d txErr=%lu rxErr=%lu busErr=%lu txq=%lu rxq=%lu\n",
+                      selfTestResult == 1 ? "OK" : selfTestResult == 0 ? "FAIL" : "?",
+                      ok ? "ok" : "FAIL", (unsigned long) rxCount, (int) st.state,
+                      (unsigned long) st.tx_error_counter, (unsigned long) st.rx_error_counter,
+                      (unsigned long) st.bus_error_count,
+                      (unsigned long) st.msgs_to_tx, (unsigned long) st.msgs_to_rx);
+    }
+#endif
+
     twai_message_t msg;
     if (twai_receive(&msg, pdMS_TO_TICKS(50)) != ESP_OK) {
         return;
     }
+    rxCount++;
+#ifdef FAKE_ECU_DEBUG
+    Serial.printf("RX id %03lX [", (unsigned long) msg.identifier);
+    for (int i = 0; i < msg.data_length_code; i++) Serial.printf("%02X ", msg.data[i]);
+    Serial.println("]");
+#endif
 
     // Nur auf funktionale (0x7DF) oder direkt an uns gerichtete (0x7E0)
     // Anfragen reagieren - Flow-Control-Frames (0x30) werden separat in

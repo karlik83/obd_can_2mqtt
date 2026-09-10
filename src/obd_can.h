@@ -71,6 +71,12 @@ typedef enum {
 #define SET_ALL_TO_DEFAULTS   "AT D"
 #define RESPONSE_OK            "OK"
 
+// In ELMduino.h definiert; OBDState.cpp nutzt es zur Gruppierung der
+// "supported PIDs"-Abfragen (0x00/0x20/0x40/...).
+#ifndef PID_INTERVAL_OFFSET
+#define PID_INTERVAL_OFFSET   0x20
+#endif
+
 #define OBD_CAN_MAX_DTC        16
 #define OBD_CAN_PAYLOAD_LEN    64
 
