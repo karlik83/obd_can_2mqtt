@@ -269,6 +269,7 @@ bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outD
     // use currentDTCCodes()/resetDTC().
     const bool twoByteDid = obdCanTwoByteDid(service, pid);
     activeReqId = reqHeader != 0 ? reqHeader : OBD_CAN_REQUEST_ID;
+    lastNrc = 0;
 
     uint8_t request[8] = {0};
     uint8_t requestLen;
@@ -322,14 +323,15 @@ bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outD
     const bool didEcho = !twoByteDid ||
                          (rawLen >= 3 && raw[1] == ((pid >> 8) & 0xFF) && raw[2] == (pid & 0xFF));
     if (rawLen < echoLen || raw[0] != static_cast<uint8_t>(service + 0x40) || !didEcho) {
-#ifdef OBD_CAN_DEBUG
         if (rawLen >= 3 && raw[0] == 0x7F) {
             // Negative Response: raw[1] = requested service, raw[2] = NRC
             // (0x11 serviceNotSupported, 0x31 requestOutOfRange, 0x7F/0x22
             // serviceNotSupportedInActiveSession -> needs 10 03, ...).
+            lastNrc = raw[2];
+#ifdef OBD_CAN_DEBUG
             Serial.printf("obd_can: NRC for %02X %04X -> 0x%02X\n", service, pid, raw[2]);
-        }
 #endif
+        }
         nb_rx_state = ELM_NO_DATA;
         return false;
     }

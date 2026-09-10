@@ -62,6 +62,7 @@
 #include "obd.h"
 #include "gsm.h"
 #include "http.h"
+#include "livedata_page.h"
 
 HTTPServer server(80);
 
@@ -85,6 +86,11 @@ std::atomic<unsigned int> wifiAPStaConnected{0};
 
 std::atomic_bool obdConnected{false};
 std::atomic<int> obdConnectErrors{0};
+
+// Handshake so the HTTP task can safely rebuild the state list (PUT /api/states)
+// while the read task keeps running (native CAN stays alive during AP use).
+std::atomic_bool pauseOBD{false};
+std::atomic_bool obdPaused{false};
 
 std::atomic<unsigned long> startTime{0};
 
@@ -176,7 +182,12 @@ void WiFiAPStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
 
     if (wifiAPStaConnected == 1) {
         DEBUG_PORT.println("AP in use.");
+#ifndef USE_CAN
+        // BT/BLE cannot coexist with the AP - tear the OBD link down. Native CAN
+        // has no such conflict, so keep it alive: the /livedata page and the PID
+        // scanner need it while a client is connected to the AP.
         OBD.end();
+#endif
     }
 }
 
@@ -187,9 +198,11 @@ void WiFiAPStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
 
     if (wifiAPStaConnected == 0) {
         DEBUG_PORT.println("AP all clients disconnected.");
+#ifndef USE_CAN
         OBD.begin(Settings.OBD2.getName(OBD_ADP_NAME), Settings.OBD2.getMAC(), Settings.OBD2.getProtocol(),
                   Settings.OBD2.getCheckPIDSupport(), Settings.OBD2.getDebug(), Settings.OBD2.getSpecifyNumResponses());
         OBD.connect(true);
+#endif
         wifiAPInUse = false;
     }
 }
@@ -279,17 +292,78 @@ void startHttpServer() {
 
                     if (index + len == total) {
                         auto json = std::string(static_cast<const char *>(request->_tempObject), total);
-                        if (OBD.parseJSON(json)) {
-                            if (OBD.writeStates(LittleFS)) {
-                                request->send(200);
-                            }
-                        } else {
-                            request->send(500);
+
+                        pauseOBD = true;
+                        const unsigned long t0 = millis();
+                        while (!obdPaused && millis() - t0 < 2000) {
+                            delay(5);
                         }
+
+                        const bool ok = OBD.parseJSON(json) && OBD.writeStates(LittleFS);
+
+                        pauseOBD = false;
+
+                        request->send(ok ? 200 : 500);
                     }
                 }
             } else {
                 request->send(406);
+            }
+        }
+    );
+
+    // --- Live-data page + ad-hoc PID/DID scanner ---
+    server.on("/livedata", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", LIVEDATA_HTML);
+    });
+
+    server.on("/api/obd/live", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, MIME_TYPE_JSON, OBD.liveDataJSON().c_str());
+    });
+
+    server.on("/api/obd/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, MIME_TYPE_JSON, OBD.diagScanJSON().c_str());
+    });
+
+    server.on(
+        "/api/obd/scan",
+        HTTP_POST,
+        [](AsyncWebServerRequest *request) {
+        },
+        nullptr,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            if (request->contentType() != MIME_TYPE_JSON) {
+                request->send(406);
+                return;
+            }
+            if (!index) {
+                request->_tempObject = malloc(total + 1);
+            }
+            if (request->_tempObject == nullptr) {
+                request->send(500);
+                return;
+            }
+            memcpy(static_cast<uint8_t *>(request->_tempObject) + index, data, len);
+            if (index + len != total) {
+                return;
+            }
+            static_cast<char *>(request->_tempObject)[total] = '\0';
+
+            JsonDocument doc;
+            if (deserializeJson(doc, static_cast<const char *>(request->_tempObject))) {
+                request->send(400);
+                return;
+            }
+
+            const uint8_t service = doc["service"] | 0x22;
+            const uint32_t header = doc["header"] | 0u;
+            const uint16_t from = doc["from"] | 0u;
+            const uint16_t to = doc["to"] | (from);
+
+            if (OBD.startDiagScan(service, from, to, header)) {
+                request->send(200, MIME_TYPE_JSON, OBD.diagScanJSON().c_str());
+            } else {
+                request->send(409, MIME_TYPE_PLAIN, "busy or invalid range");
             }
         }
     );
@@ -825,6 +899,16 @@ void mqttSendData() {
 
 [[noreturn]] void readStatesTask(void *parameters) {
     for (;;) {
+        // The HTTP task rebuilds the state list on PUT /api/states - stand down
+        // so it can do that without racing OBD.loop() (native CAN keeps running
+        // during AP use, so wifiAPInUse alone is not enough).
+        if (pauseOBD) {
+            obdPaused = true;
+            delay(20);
+            continue;
+        }
+        obdPaused = false;
+
         if (!wifiAPInUse) {
             if (clearDTC) {
                 DEBUG_PORT.print("DTC reset ");
@@ -837,6 +921,12 @@ void mqttSendData() {
             }
 
             OBD.loop();
+#ifdef USE_CAN
+        } else {
+            // Native CAN has no WiFi coexistence issue - keep reading so the
+            // /livedata page and PID scanner stay live while a client is on the AP.
+            OBD.loop();
+#endif
         }
         delay(10);
     }
@@ -959,7 +1049,28 @@ String buildIdentifier(const char *devMac) {
     return mID;
 }
 
+#ifdef LIVEDATA_SELFTEST
+// One-shot check of the live-data / scanner backend against tools/fake-ecu.
+// Build with -DLIVEDATA_SELFTEST. Not for production images.
+[[noreturn]] void livedataSelftestTask(void *) {
+    delay(25000);
+    Serial.println("livedata-selftest: startDiagScan(0x22, 0x1E00..0x1E40, 0x7E5) -> " +
+                   String(OBD.startDiagScan(0x22, 0x1E00, 0x1E40, 0x7E5) ? "started" : "REFUSED"));
+    for (int i = 0; i < 20; i++) {
+        delay(1000);
+        const std::string j = OBD.diagScanJSON();
+        Serial.printf("livedata-selftest: scan %s\n", j.c_str());
+        if (j.find("\"running\":true") == std::string::npos) break;
+    }
+    Serial.printf("livedata-selftest: live %s\n", OBD.liveDataJSON().c_str());
+    for (;;) delay(10000);
+}
+#endif
+
 void startOutputTask(const char *id) {
+#ifdef LIVEDATA_SELFTEST
+    xTaskCreatePinnedToCore(livedataSelftestTask, "lvst", 6144, nullptr, 1, nullptr, 1);
+#endif
     if (!Settings.MQTT.getHostname().isEmpty()) {
         mqtt.setClient(gsm.getClient(Settings.MQTT.getSecure()));
         mqtt.setIdentifier(id);

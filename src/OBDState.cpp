@@ -86,6 +86,22 @@ bool OBDState::isDiagnostic() const {
     return this->diagnostic;
 }
 
+uint8_t OBDState::getService() const {
+    return this->service;
+}
+
+uint16_t OBDState::getPid() const {
+    return this->pid;
+}
+
+uint32_t OBDState::getHeader() const {
+    return this->header;
+}
+
+int8_t OBDState::getUpdateStatus() const {
+    return this->updateStatus;
+}
+
 void OBDState::setCalcExpression(const char *expression) {
     this->type = obd::CALC;
     strlcpy(this->calcExpression, expression, sizeof(this->calcExpression));

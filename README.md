@@ -133,7 +133,19 @@ Diagnostic Output on all profiles:
 <img width="200" alt="Sensors2" src="assets/obd2-mqtt-ha-02.png">
 </p>
 
-More profiles can be found [here](profiles).
+More profiles can be found [here](profiles). `profiles/states-ev-discovery.json` is a
+"raw hex" set of EV battery DIDs (VW/Audi) for working out the scaling of unknown
+values by plausibility.
+
+### Live data page
+
+`http://192.168.4.1/livedata` (open while connected to the device's Wi-Fi AP) shows
+the current value **and raw response** of every configured state, and has an
+interactive scanner for ad-hoc service/DID ranges (`Service` / `Header` /
+`DID from`–`to`, all hex). Positive responses are listed with the data bytes and a
+few candidate decodings; DIDs that answer "not supported" (NRC 0x11 / 0x31) are
+skipped. Native CAN only for the scanner. The page ships inside the firmware, so a
+plain `pio run -t upload` adds it without touching the device configuration.
 
 ### Custom OBD States
 

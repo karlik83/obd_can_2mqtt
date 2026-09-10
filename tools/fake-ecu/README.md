@@ -46,8 +46,12 @@ This exercises the physically addressed UDS path in `src/obd_can.cpp` (header
 via `AT SH`, 16-bit DIDs, non-`+8` response IDs, ISO-TP reassembly for the
 Flow-Control direction).
 
-To let the main firmware run a one-shot check of all of the above at boot, build
-it with `-DOBD_CAN_UDS_SELFTEST` (add `-DOBD_CAN_DEBUG` for the raw frame log):
+Main-firmware self-test build flags (serial output, not for production):
+
+| Flag | Effect |
+|---|---|
+| `-DOBD_CAN_UDS_SELFTEST` | one-shot service 0x22 read of a few DIDs at boot (add `-DOBD_CAN_DEBUG` for the raw frame log) |
+| `-DLIVEDATA_SELFTEST` | one-shot `startDiagScan()` + `diagScanJSON()` + `liveDataJSON()` ~25 s after boot – checks the `/livedata` backend |
 
 ```
 PLATFORMIO_BUILD_FLAGS="-DOBD_CAN_UDS_SELFTEST -DOBD_CAN_DEBUG" \

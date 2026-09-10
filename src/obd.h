@@ -25,8 +25,13 @@
 #endif
 #endif
 
+#include <Arduino.h>
 #include <bitset>
+#include <string>
+#include <vector>
 #include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <OBDStates.h>
 
 #ifndef USE_CAN
@@ -152,6 +157,32 @@ class OBDClass : public OBDStates {
     template<typename T>
     T *setFormatFuncByName(const char *funcName, T *state);
 
+    // --- Live-data view + ad-hoc PID/DID scanner (see /livedata, /api/obd/*) ---
+    SemaphoreHandle_t diagMux = nullptr;
+    std::string liveJson = "[]";
+    unsigned long lastLiveBuild = 0;
+
+    struct DiagScanResult {
+        uint16_t pid;
+        std::string raw; // positive response as hex, or ""
+        uint8_t nrc;     // negative response code, 0 if none
+    };
+
+    struct {
+        volatile bool requested = false;
+        volatile bool running = false;
+        uint8_t service = 0x22;
+        uint32_t header = 0;
+        uint16_t from = 0;
+        uint16_t to = 0;
+        uint16_t cur = 0;
+        std::vector<DiagScanResult> results;
+    } diagScan;
+
+    void buildLiveJson();
+
+    void serviceDiagScan();
+
 public:
     OBDClass();
 
@@ -191,6 +222,18 @@ public:
     std::string getConnectedBTAddress() const;
 
     uint16_t getPayloadLength() const;
+
+    // Current value + raw response of every READ/CALC state, as a JSON array.
+    // Safe to call from the HTTP task.
+    std::string liveDataJSON();
+
+    // Kick off an ad-hoc scan of service/DID `from`..`to` on ECU `header`
+    // (0 = functional broadcast). Runs on the OBD task. Returns false if a scan
+    // is already in progress or the range is invalid. CAN builds only.
+    bool startDiagScan(uint8_t service, uint16_t from, uint16_t to, uint32_t header);
+
+    // Progress + collected results of the current/last scan, as JSON.
+    std::string diagScanJSON();
 };
 
 extern OBDClass OBD;

@@ -122,6 +122,15 @@ public:
 
     bool isDiagnostic() const;
 
+    // Read-only accessors for the live-data / diagnostics view (see /api/obd/live).
+    uint8_t getService() const;
+
+    uint16_t getPid() const;
+
+    uint32_t getHeader() const;
+
+    int8_t getUpdateStatus() const;
+
     virtual void setCalcExpression(const char *expression);
 
     virtual bool hasCalcExpression() const;

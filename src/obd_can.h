@@ -95,6 +95,10 @@ public:
     static const uint16_t PAYLOAD_LEN = OBD_CAN_PAYLOAD_LEN;
     char payload[OBD_CAN_PAYLOAD_LEN + 1] = {'\0'};
 
+    // Negative Response Code of the last request (0 = none / positive response).
+    // Read by the PID scanner (/api/obd/scan) to show why a DID was rejected.
+    uint8_t lastNrc = 0;
+
     DTCResponseCompat DTC_Response;
 
     ELM327();
@@ -112,6 +116,12 @@ public:
     // (see OBDState.cpp:126,434,438)
     double processPID(uint8_t service, uint16_t pid, uint8_t numResponses,
                        uint8_t numExpectedBytes, double scaleFactor = 1, double bias = 0);
+
+    // Per-request response timeout in ms. The PID scanner lowers this so a range
+    // of DIDs that partly time out does not take minutes.
+    void setResponseTimeout(uint32_t ms) { timeoutMs = ms; }
+
+    uint32_t getResponseTimeout() const { return timeoutMs; }
 
     // Called from OBDState.cpp for AT header commands. In CAN mode the only ones
     // issued are "AT SH <hex>" (set the target ECU request ID, for UDS service

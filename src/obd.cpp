@@ -491,6 +491,9 @@ void OBDClass::begin(const String &devName, const String &devMac, const char pro
     this->debug = debug;
     this->specifyNumResponses = specifyNumResponses;
     stopConnect = false;
+    if (diagMux == nullptr) {
+        diagMux = xSemaphoreCreateMutex();
+    }
 #ifndef USE_CAN
 #ifdef USE_BLE
     serialBLE.onDisconnect(onBLEDisconnect);
@@ -776,9 +779,198 @@ void OBDClass::loop() {
 #else
         nextState();
 #endif
+        serviceDiagScan();
     } else {
         delay(500);
     }
+
+    buildLiveJson();
+}
+
+void OBDClass::buildLiveJson() {
+    if (diagMux == nullptr || millis() - lastLiveBuild < 1000) {
+        return;
+    }
+    lastLiveBuild = millis();
+
+    std::vector<OBDState *> all;
+    getStates([](OBDState *) { return true; }, all);
+
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (auto *s: all) {
+        if (s == nullptr || (s->getType() != obd::READ && s->getType() != obd::CALC)) {
+            continue;
+        }
+        JsonObject o = arr.add<JsonObject>();
+        o["name"] = s->getName();
+        o["desc"] = s->getDescription();
+        o["unit"] = s->getUnit();
+        o["diag"] = s->isDiagnostic();
+        o["enabled"] = s->isEnabled();
+        o["calc"] = s->getType() == obd::CALC;
+        o["svc"] = s->getService();
+        o["pid"] = s->getPid();
+        o["hdr"] = s->getHeader();
+        o["status"] = s->getUpdateStatus();
+        const long lu = s->getLastUpdate();
+        o["age"] = lu > 0 ? static_cast<long>(millis() - lu) : -1;
+
+        const char *raw = s->getPayload();
+        o["raw"] = raw != nullptr ? raw : "";
+
+        if (strcmp(s->valueType(), OBD_STATE_TYPE_INT) == 0) {
+            o["value"] = reinterpret_cast<TypedOBDState<int> *>(s)->getValue();
+        } else if (strcmp(s->valueType(), OBD_STATE_TYPE_FLOAT) == 0) {
+            o["value"] = reinterpret_cast<TypedOBDState<float> *>(s)->getValue();
+        } else if (strcmp(s->valueType(), OBD_STATE_TYPE_BOOL) == 0) {
+            o["value"] = reinterpret_cast<TypedOBDState<bool> *>(s)->getValue();
+        }
+    }
+
+    std::string out;
+    serializeJson(doc, out);
+
+    if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(50)) == pdTRUE) {
+        liveJson.swap(out);
+        xSemaphoreGive(diagMux);
+    }
+}
+
+std::string OBDClass::liveDataJSON() {
+    if (diagMux == nullptr) {
+        return "[]";
+    }
+    std::string copy = "[]";
+    if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+        copy = liveJson;
+        xSemaphoreGive(diagMux);
+    }
+    return copy;
+}
+
+bool OBDClass::startDiagScan(const uint8_t service, const uint16_t from, const uint16_t to, const uint32_t header) {
+#ifdef USE_CAN
+    if (diagMux == nullptr || to < from || static_cast<uint32_t>(to - from) > 4095) {
+        return false;
+    }
+    bool ok = false;
+    if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (!diagScan.running && !diagScan.requested) {
+            diagScan.service = service;
+            diagScan.header = header;
+            diagScan.from = from;
+            diagScan.to = to;
+            diagScan.cur = from;
+            diagScan.results.clear();
+            diagScan.requested = true;
+            ok = true;
+        }
+        xSemaphoreGive(diagMux);
+    }
+    return ok;
+#else
+    (void) service; (void) from; (void) to; (void) header;
+    return false;
+#endif
+}
+
+void OBDClass::serviceDiagScan() {
+#ifdef USE_CAN
+    if (diagMux == nullptr || (!diagScan.requested && !diagScan.running)) {
+        return;
+    }
+
+    uint8_t service;
+    uint32_t header;
+    uint16_t cur, to;
+    if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    if (diagScan.requested) {
+        diagScan.requested = false;
+        diagScan.running = true;
+        diagScan.cur = diagScan.from;
+    }
+    service = diagScan.service;
+    header = diagScan.header;
+    cur = diagScan.cur;
+    to = diagScan.to;
+    xSemaphoreGive(diagMux);
+
+    const uint32_t savedTimeout = elm327.getResponseTimeout();
+    elm327.setResponseTimeout(250);
+
+    char sh[16];
+    if (header != 0) {
+        snprintf(sh, sizeof(sh), "AT SH %lX", static_cast<unsigned long>(header));
+        elm327.sendCommand_Blocking(sh);
+    }
+
+    uint16_t pid = cur;
+    for (int batch = 0; pid <= to && batch < 4; ++pid, ++batch) {
+        elm327.processPID(service, pid, 1, 8);
+        const bool ok = elm327.nb_rx_state == ELM_SUCCESS && strlen(elm327.payload) > 0;
+        const uint8_t nrc = elm327.lastNrc;
+        // Skip the "definitely not there" answers (0x11 serviceNotSupported,
+        // 0x31 requestOutOfRange). Keep positives and interesting NRCs like
+        // 0x33 (security), 0x22 (conditions), 0x7E/0x7F (needs a session).
+        if (ok || (nrc != 0 && nrc != 0x11 && nrc != 0x31)) {
+            DiagScanResult r{};
+            r.pid = pid;
+            r.raw = ok ? elm327.payload : "";
+            r.nrc = ok ? 0 : nrc;
+            if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(50)) == pdTRUE) {
+                if (diagScan.results.size() < 512) {
+                    diagScan.results.push_back(r);
+                }
+                xSemaphoreGive(diagMux);
+            }
+        }
+    }
+
+    if (header != 0) {
+        elm327.sendCommand_Blocking("AT D");
+    }
+    elm327.setResponseTimeout(savedTimeout);
+
+    if (xSemaphoreTake(diagMux, pdMS_TO_TICKS(50)) == pdTRUE) {
+        diagScan.cur = pid;
+        if (pid > to) {
+            diagScan.running = false;
+        }
+        xSemaphoreGive(diagMux);
+    }
+#endif
+}
+
+std::string OBDClass::diagScanJSON() {
+    JsonDocument doc;
+    if (diagMux != nullptr && xSemaphoreTake(diagMux, pdMS_TO_TICKS(200)) == pdTRUE) {
+        doc["running"] = diagScan.running || diagScan.requested;
+        doc["service"] = diagScan.service;
+        doc["header"] = diagScan.header;
+        doc["from"] = diagScan.from;
+        doc["to"] = diagScan.to;
+        const int total = diagScan.to - diagScan.from + 1;
+        doc["total"] = total;
+        doc["done"] = (diagScan.running || diagScan.requested)
+                          ? diagScan.cur - diagScan.from
+                          : total;
+        JsonArray a = doc["results"].to<JsonArray>();
+        for (auto &r: diagScan.results) {
+            JsonObject o = a.add<JsonObject>();
+            o["pid"] = r.pid;
+            o["raw"] = r.raw;
+            o["nrc"] = r.nrc;
+        }
+        xSemaphoreGive(diagMux);
+    } else {
+        doc["running"] = false;
+    }
+    std::string out;
+    serializeJson(doc, out);
+    return out;
 }
 
 void OBDClass::onConnected(const std::function<void()> &callback) {
