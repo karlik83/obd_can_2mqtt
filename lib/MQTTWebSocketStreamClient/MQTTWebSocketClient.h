@@ -28,6 +28,22 @@ public:
 
     int begin(const String &aPath, const char *protocol = nullptr);
 
+    /**
+     * Send a complete masked binary WebSocket frame in a single transport write.
+     *
+     * WebSocketClient::endMessage() emits the opcode byte, length byte(s), the
+     * 4-byte mask and the payload as separate write() calls. Over the cellular
+     * modem each becomes its own AT+CCHSEND / TLS record, and Mosquitto's
+     * libwebsockets frame parser drops the connection when a frame header does
+     * not arrive in one piece ("First packet not CONNECT"). Assembling the whole
+     * frame here and writing it once avoids that.
+     *
+     * @param buf the payload
+     * @param len the payload length
+     * @return <code>0</code> on success
+     */
+    int sendBinaryFrame(const uint8_t *buf, size_t len);
+
     bool flush(unsigned int maxWaitMs = 0);
 
     bool stop(unsigned int maxWaitMs = 0);

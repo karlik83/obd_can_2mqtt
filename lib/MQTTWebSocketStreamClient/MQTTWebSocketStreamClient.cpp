@@ -43,10 +43,7 @@ size_t MQTTWebSocketStreamClient::write(uint8_t b) {
 size_t MQTTWebSocketStreamClient::write(const uint8_t *buf, size_t size) {
     if (!connected())
         return -1;
-    webSocketClient->beginMessage(TYPE_BINARY);
-    webSocketClient->write(buf, size);
-    webSocketClient->endMessage();
-    return size;
+    return webSocketClient->sendBinaryFrame(buf, size) == 0 ? size : 0;
 }
 
 int MQTTWebSocketStreamClient::available() {

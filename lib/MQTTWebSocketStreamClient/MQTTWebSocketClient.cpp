@@ -18,6 +18,8 @@
 #include "MQTTWebSocketClient.h"
 #include "b64.h"
 
+#include <vector>
+
 MQTTWebSocketClient::MQTTWebSocketClient(Client &client, const char *host, uint16_t port): WebSocketClient(
     client, host, port) {
     connectionKeepAlive();
@@ -70,6 +72,38 @@ int MQTTWebSocketClient::begin(const char *aPath, const char *protocol) {
 
 int MQTTWebSocketClient::begin(const String &aPath, const char *protocol) {
     return begin(aPath.c_str(), protocol);
+}
+
+int MQTTWebSocketClient::sendBinaryFrame(const uint8_t *buf, const size_t len) {
+    std::vector<uint8_t> frame;
+    frame.reserve(2 + 8 + 4 + len);
+
+    // FIN + binary opcode, masked payload (client frames must be masked)
+    frame.push_back(0x80 | (TYPE_BINARY & 0x0f));
+    if (len < 126) {
+        frame.push_back(0x80 | static_cast<uint8_t>(len));
+    } else if (len < 0xffff) {
+        frame.push_back(0x80 | 126);
+        frame.push_back((len >> 8) & 0xff);
+        frame.push_back((len >> 0) & 0xff);
+    } else {
+        frame.push_back(0x80 | 127);
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            frame.push_back((len >> shift) & 0xff);
+        }
+    }
+
+    uint8_t maskKey[4];
+    for (unsigned char &b: maskKey) {
+        b = static_cast<uint8_t>(random(0x100));
+    }
+    frame.insert(frame.end(), maskKey, maskKey + sizeof(maskKey));
+
+    for (size_t i = 0; i < len; i++) {
+        frame.push_back(buf[i] ^ maskKey[i % sizeof(maskKey)]);
+    }
+
+    return HttpClient::write(frame.data(), frame.size()) == frame.size() ? 0 : 1;
 }
 
 bool MQTTWebSocketClient::flush(unsigned int maxWaitMs) {
