@@ -1,34 +1,35 @@
 /*
  * fake_ecu / main.cpp
  *
- * Simulierte Fahrzeug-ECU fuer den Test von ../../src/obd_can.cpp OHNE Auto.
+ * Simulated vehicle ECU for testing ../../src/obd_can.cpp WITHOUT a car.
  *
- * Laeuft auf einem zweiten, GUENSTIGEN ESP32-Devkit + SN65HVD230-CAN-
- * Transceiver. Beantwortet Standard-OBD2-Anfragen (Service 0x01) und
- * simuliert dabei realistische, sich veraendernde Werte fuer:
- *   - PID 0x0C  Drehzahl (RPM)
- *   - PID 0x0D  Geschwindigkeit
- *   - PID 0x05  Kuehlmitteltemperatur
- *   - PID 0x11  Drosselklappenstellung
- *   - PID 0x42  Steuergeraete-Spannung (Ersatz fuer "AT RV")
+ * Runs on a second, cheap ESP32 devkit + CAN transceiver. Answers standard
+ * OBD2 requests (service 0x01) and simulates realistic, changing values for:
+ *   - PID 0x0C  engine RPM
+ *   - PID 0x0D  vehicle speed
+ *   - PID 0x05  coolant temperature
+ *   - PID 0x11  throttle position
+ *   - PID 0x42  control module voltage (substitute for "AT RV")
  *
- * Zusaetzlich:
- *   - Service 0x09 PID 0x02 (VIN) -> testet den Multi-Frame/ISO-TP-Pfad
- *     inkl. Flow-Control-Handling deiner obd_can.cpp
- *   - Service 0x03 (DTCs lesen) -> liefert 2 Testfehlercodes
- *   - Service 0x04 (DTCs loeschen) -> quittiert mit positiver Antwort
+ * Additionally:
+ *   - Service 0x09 PID 0x02 (VIN) -> exercises the multi-frame / ISO-TP path
+ *     incl. the flow-control handling in obd_can.cpp
+ *   - Service 0x03 (read DTCs) -> returns 2 test trouble codes
+ *   - Service 0x04 (clear DTCs) -> acknowledges with a positive response
  *
- * VERKABELUNG (Testboard <-> obd2-mqtt-Board):
- *   Testboard SN65HVD230 CAN-H  <-> obd2-mqtt-Board SN65HVD230 CAN-H
- *   Testboard SN65HVD230 CAN-L  <-> obd2-mqtt-Board SN65HVD230 CAN-L
- *   GND von beiden Boards verbinden (gemeinsame Masse!)
- *   An JEDEM Ende der CAN-H/CAN-L-Leitung 120 Ohm zwischen H und L -
- *   also insgesamt 2x 120 Ohm (nicht mehr, sonst Bus zu stark belastet).
+ * WIRING (test board <-> obd2-mqtt board):
+ *   test board CAN-H  <-> obd2-mqtt board CAN-H
+ *   test board CAN-L  <-> obd2-mqtt board CAN-L
+ *   connect GND of both boards (common ground!)
+ *   120 Ohm between H and L at EACH end of the bus (measure ~60 Ohm across it).
+ *   Do NOT add extra resistors - the Waveshare boards already have onboard
+ *   termination (jumper). CJMCU-230 boards do not transmit reliably; use a
+ *   Waveshare "SN65HVD230 CAN Board" instead.
  *
- * Pins hier: TX=GPIO13, RX=GPIO14 (LilyGO T7_S3 / ESP32-S3-WROOM-1-N16R8).
- * Keine Strapping-Pins, kollidieren nicht mit USB-JTAG (GPIO19/20) oder
- * internem Flash/PSRAM. Ueber die GPIO-Matrix des S3 frei waehlbar - bei
- * Bedarf unten anpassen.
+ * Pins here: TX=GPIO13, RX=GPIO14 (LilyGO T7-S3 / ESP32-S3-WROOM-1-N16R8).
+ * No strapping pins, no clash with the USB-JTAG (GPIO19/20) or internal
+ * flash/PSRAM. Freely routable through the S3 GPIO matrix - adjust below if
+ * needed.
  */
 
 #include <Arduino.h>
@@ -37,8 +38,8 @@
 #define CAN_TX_PIN   GPIO_NUM_13
 #define CAN_RX_PIN   GPIO_NUM_14
 
-// Bus-Bitrate muss zum Testpartner (obd_can_config.h: OBD_CAN_BITRATE_KBPS)
-// passen. 500 = normal, 125 nur zur Verkabelungs-Diagnose.
+// The bus bitrate must match the test partner (obd_can_config.h:
+// OBD_CAN_BITRATE_KBPS). 500 = normal, 125 only for wiring diagnostics.
 #ifndef FAKE_ECU_BITRATE_KBPS
 #define FAKE_ECU_BITRATE_KBPS  500
 #endif
@@ -50,22 +51,22 @@
 #define FAKE_ECU_TIMING  TWAI_TIMING_CONFIG_125KBITS()
 #endif
 
-#define OBD_REQUEST_ID   0x7DF   // funktionale Anfrage vom Tester
-#define OBD_MY_REQUEST_ID 0x7E0  // "physische" Anfrage direkt an diese ECU
-#define OBD_RESPONSE_ID  0x7E8   // Antwort-ID dieser simulierten ECU
+#define OBD_REQUEST_ID   0x7DF   // functional request from the tester
+#define OBD_MY_REQUEST_ID 0x7E0  // "physical" request addressed to this ECU
+#define OBD_RESPONSE_ID  0x7E8   // response ID of this simulated ECU
 
 // ---------------------------------------------------------------------
-// Simulierte Sensorwerte - veraendern sich langsam, damit man im Log
-// sieht, dass tatsaechlich "lebende" Daten reinkommen.
+// Simulated sensor values - they change slowly so that you can see in the
+// log that actual "live" data is coming in.
 // ---------------------------------------------------------------------
-uint16_t simRpm = 800;       // Standgas-RPM als Start
+uint16_t simRpm = 800;       // idle RPM as the starting point
 uint8_t  simSpeed = 0;       // km/h
-uint8_t  simCoolant = 70;    // Grad C + 40 Offset (OBD2-Formel: A-40)
-uint8_t  simThrottle = 15;   // 0-100 % (skaliert auf 0-255)
+uint8_t  simCoolant = 70;    // deg C (OBD2 formula adds the +40 offset: A-40)
+uint8_t  simThrottle = 15;   // 0-100 % (scaled to 0-255)
 bool     simDirectionUp = true;
 
 void updateSimValues() {
-    // RPM pendelt zwischen 800 und 3000
+    // RPM sweeps between 800 and 3000
     if (simDirectionUp) {
         simRpm += 50;
         if (simRpm >= 3000) simDirectionUp = false;
@@ -73,12 +74,12 @@ void updateSimValues() {
         simRpm -= 50;
         if (simRpm <= 800) simDirectionUp = true;
     }
-    simSpeed = (simRpm - 800) / 40;         // grobe Kopplung an RPM
-    simThrottle = 15 + (simRpm - 800) / 30; // ebenfalls grob gekoppelt
+    simSpeed = (simRpm - 800) / 40;         // rough coupling to RPM
+    simThrottle = 15 + (simRpm - 800) / 30; // rough coupling as well
 }
 
 // ---------------------------------------------------------------------
-// CAN-Hilfsfunktionen
+// CAN helpers
 // ---------------------------------------------------------------------
 bool sendFrame(uint32_t id, const uint8_t *data, uint8_t len) {
     twai_message_t msg = {};
@@ -91,8 +92,8 @@ bool sendFrame(uint32_t id, const uint8_t *data, uint8_t len) {
     return twai_transmit(&msg, pdMS_TO_TICKS(100)) == ESP_OK;
 }
 
-// Wartet auf einen Flow-Control-Frame (0x30) vom Tester, z.B. nach dem
-// Senden eines First Frame bei einer Multi-Frame-Antwort (VIN).
+// Waits for a Flow Control frame (0x30) from the tester, e.g. after sending a
+// First Frame of a multi-frame response (VIN).
 bool waitForFlowControl(uint32_t timeoutMs) {
     twai_message_t msg;
     uint32_t start = millis();
@@ -104,81 +105,81 @@ bool waitForFlowControl(uint32_t timeoutMs) {
             }
         }
     }
-    return false; // kein FC bekommen - Tester haelt sich evtl. nicht ans Protokoll
+    return false; // no FC received - the tester may not follow the protocol
 }
 
 // ---------------------------------------------------------------------
-// Service 0x01 - aktuelle Sensordaten (Single-Frame-Antworten)
+// Service 0x01 - current sensor data (single-frame responses)
 // ---------------------------------------------------------------------
 void handleMode01(uint8_t pid) {
     uint8_t resp[8] = {0};
     uint8_t len = 0;
 
     switch (pid) {
-        case 0x0C: { // RPM, Formel: ((A*256)+B)/4
+        case 0x0C: { // RPM, formula: ((A*256)+B)/4
             uint16_t raw = simRpm * 4;
             resp[0] = 0x04; resp[1] = 0x41; resp[2] = 0x0C;
             resp[3] = (raw >> 8) & 0xFF; resp[4] = raw & 0xFF;
             len = 5;
             break;
         }
-        case 0x0D: // Speed, Formel: A
+        case 0x0D: // speed, formula: A
             resp[0] = 0x03; resp[1] = 0x41; resp[2] = 0x0D; resp[3] = simSpeed;
             len = 4;
             break;
-        case 0x05: // Kuehlmitteltemp, Formel: A-40
+        case 0x05: // coolant temp, formula: A-40
             resp[0] = 0x03; resp[1] = 0x41; resp[2] = 0x05; resp[3] = simCoolant + 40;
             len = 4;
             break;
-        case 0x11: // Drosselklappe, Formel: A*100/255
+        case 0x11: // throttle, formula: A*100/255
             resp[0] = 0x03; resp[1] = 0x41; resp[2] = 0x11;
             resp[3] = static_cast<uint8_t>(simThrottle * 255 / 100);
             len = 4;
             break;
-        case 0x42: { // Steuergeraete-Spannung, Formel: ((A*256)+B)/1000
-            uint16_t raw = 13800; // simuliert 13.8V
+        case 0x42: { // control module voltage, formula: ((A*256)+B)/1000
+            uint16_t raw = 13800; // simulates 13.8V
             resp[0] = 0x04; resp[1] = 0x41; resp[2] = 0x42;
             resp[3] = (raw >> 8) & 0xFF; resp[4] = raw & 0xFF;
             len = 5;
             break;
         }
         default:
-            // Negative Response: Service nicht unterstuetzt (PID unbekannt)
+            // Negative Response: service not supported (unknown PID)
             resp[0] = 0x03; resp[1] = 0x7F; resp[2] = 0x01; resp[3] = 0x12;
             len = 4;
             break;
     }
 
     sendFrame(OBD_RESPONSE_ID, resp, len);
-    Serial.printf("-> Mode01 PID 0x%02X beantwortet\n", pid);
+    Serial.printf("-> Mode01 PID 0x%02X answered\n", pid);
 }
 
 // ---------------------------------------------------------------------
-// Service 0x09 PID 0x02 - VIN, absichtlich als Multi-Frame-Antwort
-// (17 Zeichen VIN + 1 Fuellbyte -> testet First/Consecutive Frame)
+// Service 0x09 PID 0x02 - VIN, deliberately sent as a multi-frame response
+// (17 VIN chars + 1 filler byte -> exercises First/Consecutive Frame)
 // ---------------------------------------------------------------------
 void handleVin() {
-    const char *vin = "WVWZZZ1KZAW123456"; // 18 Byte inkl. Fuellbyte vorne
-    const uint8_t totalLen = 1 + 1 + 18;   // ServiceEcho + PID + 1 Fuellbyte + 17 VIN-Zeichen -> vereinfachte Laenge
+    const char *vin = "WVWZZZ1KZAW123456"; // 18 bytes incl. leading filler byte
+    const uint8_t totalLen = 1 + 1 + 18;   // service echo + PID + 1 filler + 17 VIN chars -> simplified length
     (void) totalLen;
 
     uint8_t payload[64] = {0};
-    payload[0] = 0x49; // Service 0x09 + 0x40
-    payload[1] = 0x02; // PID Echo
-    payload[2] = 0x01; // "Anzahl Datensaetze" laut Norm, hier vereinfacht fix 1
+    payload[0] = 0x49; // service 0x09 + 0x40
+    payload[1] = 0x02; // PID echo
+    payload[2] = 0x01; // "number of data items" per spec, simplified to a fixed 1
     memcpy(&payload[3], vin, strlen(vin));
     const uint8_t fullLen = 3 + strlen(vin);
 
-    // First Frame: PCI = 0x1 + oberes Nibble der Laenge, dann unteres Byte
+    // First Frame: PCI = 0x1 + upper nibble of the length, then the lower byte
     uint8_t ff[8];
     ff[0] = 0x10 | ((fullLen >> 8) & 0x0F);
     ff[1] = fullLen & 0xFF;
     memcpy(&ff[2], payload, 6);
     sendFrame(OBD_RESPONSE_ID, ff, 8);
-    Serial.println("-> VIN First Frame gesendet, warte auf Flow Control...");
+    Serial.println("-> VIN First Frame sent, waiting for Flow Control...");
 
     if (!waitForFlowControl(500)) {
-        Serial.println("   Kein Flow-Control-Frame erhalten - sende trotzdem (Testmodus)");
+        Serial.println("   no Flow Control frame received - sending anyway (test mode)");
     }
 
     uint8_t sent = 6;
@@ -191,39 +192,39 @@ void handleVin() {
         sendFrame(OBD_RESPONSE_ID, cf, 8);
         sent += chunk;
         seq++;
-        delay(10); // simulierte Separation Time
+        delay(10); // simulated Separation Time
     }
-    Serial.println("-> VIN komplett gesendet");
+    Serial.println("-> VIN sent completely");
 }
 
 // ---------------------------------------------------------------------
-// Service 0x03 - gespeicherte DTCs (2 Testfehlercodes: P0301, P0420)
+// Service 0x03 - stored DTCs (2 test trouble codes: P0301, P0420)
 // ---------------------------------------------------------------------
 void handleMode03() {
     uint8_t resp[8] = {0x05, 0x43, 0x02, 0x03, 0x01, 0x04, 0x20, 0x00};
-    // Byte0=PCI(5 Datenbytes) Byte1=0x43 Byte2=AnzahlDTCs(2)
-    // Byte3-4 = P0301 (0x0301) Byte5-6 = P0420 (0x0420)
+    // byte0=PCI(5 data bytes) byte1=0x43 byte2=number of DTCs(2)
+    // byte3-4 = P0301 (0x0301) byte5-6 = P0420 (0x0420)
     sendFrame(OBD_RESPONSE_ID, resp, 8);
-    Serial.println("-> Mode03 (DTCs) beantwortet: P0301, P0420");
+    Serial.println("-> Mode03 (DTCs) answered: P0301, P0420");
 }
 
 // ---------------------------------------------------------------------
-// Service 0x04 - DTCs loeschen (immer erfolgreich quittieren)
+// Service 0x04 - clear DTCs (always acknowledge success)
 // ---------------------------------------------------------------------
 void handleMode04() {
     uint8_t resp[8] = {0x01, 0x44, 0, 0, 0, 0, 0, 0};
     sendFrame(OBD_RESPONSE_ID, resp, 2);
-    Serial.println("-> Mode04 (DTCs loeschen) quittiert");
+    Serial.println("-> Mode04 (clear DTCs) acknowledged");
 }
 
 // ---------------------------------------------------------------------
 // Setup / Loop
 // ---------------------------------------------------------------------
-// Einmaliger CAN-Selbsttest: im NO_ACK-Modus einen Frame mit Self-Reception
-// senden. Er laeuft ESP-TX -> Transceiver -> CANH/CANL -> Transceiver -> ESP-RX.
-// Kommt er zurueck, ist die lokale CAN-Hardware (Pins, Transceiver, Rs, Power)
-// in Ordnung und das Problem liegt in der Verbindung zwischen den Boards.
-int selfTestResult = -1; // -1 = nicht gelaufen, 0 = fail, 1 = ok
+// One-shot CAN self-test: send a frame with self-reception in NO_ACK mode.
+// It runs ESP-TX -> transceiver -> CANH/CANL -> transceiver -> ESP-RX. If it
+// comes back, the local CAN hardware (pins, transceiver, Rs, power) is ok and
+// the problem is in the board-to-board wiring.
+int selfTestResult = -1; // -1 = not run, 0 = fail, 1 = ok
 
 static void canSelfTest() {
     twai_driver_uninstall();
@@ -231,7 +232,7 @@ static void canSelfTest() {
     twai_timing_config_t t = FAKE_ECU_TIMING;
     twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     if (twai_driver_install(&g, &t, &f) != ESP_OK || twai_start() != ESP_OK) {
-        Serial.println("SELBSTTEST: Treiber-Init fehlgeschlagen");
+        Serial.println("SELFTEST: driver init failed");
         return;
     }
 
@@ -255,9 +256,9 @@ static void canSelfTest() {
     twai_status_info_t st{};
     twai_get_status_info(&st);
     selfTestResult = got ? 1 : 0;
-    Serial.printf("SELBSTTEST: %s  (busErr=%lu txErr=%lu)\n",
-                  got ? "OK - lokale CAN-HW funktioniert, Problem in der Board-zu-Board-Leitung"
-                      : "FEHLGESCHLAGEN - Transceiver/Verdrahtung/Rs/Power am DIESEM Board pruefen",
+    Serial.printf("SELFTEST: %s  (busErr=%lu txErr=%lu)\n",
+                  got ? "OK - local CAN HW works, problem is in the board-to-board wiring"
+                      : "FAILED - check transceiver/wiring/Rs/power on THIS board",
                   (unsigned long) st.bus_error_count, (unsigned long) st.tx_error_counter);
 
     twai_stop();
@@ -267,12 +268,12 @@ static void canSelfTest() {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("=== Fake-ECU startet ===");
+    Serial.println("=== Fake ECU starting ===");
 
     canSelfTest();
 
 #ifdef FAKE_ECU_NO_ACK
-    const twai_mode_t canMode = TWAI_MODE_NO_ACK; // empfaengt, bestaetigt aber nicht
+    const twai_mode_t canMode = TWAI_MODE_NO_ACK; // receives, but does not acknowledge
 #else
     const twai_mode_t canMode = TWAI_MODE_NORMAL;
 #endif
@@ -281,15 +282,15 @@ void setup() {
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK) {
-        Serial.println("FEHLER: twai_driver_install fehlgeschlagen");
+        Serial.println("ERROR: twai_driver_install failed");
         while (true) delay(1000);
     }
     if (twai_start() != ESP_OK) {
-        Serial.println("FEHLER: twai_start fehlgeschlagen");
+        Serial.println("ERROR: twai_start failed");
         while (true) delay(1000);
     }
 
-    Serial.println("CAN-Bus bereit, warte auf OBD2-Anfragen (0x7DF/0x7E0)...");
+    Serial.println("CAN bus ready, waiting for OBD2 requests (0x7DF/0x7E0)...");
 }
 
 unsigned long lastSimUpdate = 0;
@@ -299,16 +300,16 @@ unsigned long lastHeartbeat = 0;
 #endif
 
 void loop() {
-    // Simulierte Werte alle 500ms weiterlaufen lassen
+    // Keep the simulated values moving every 500ms
     if (millis() - lastSimUpdate > 500) {
         updateSimValues();
         lastSimUpdate = millis();
     }
 
 #ifdef FAKE_ECU_DEBUG
-    // Heartbeat (1 Hz Frame auf 0x555) + TWAI-Status ueber Serial - zeigt dem
-    // Testpartner, dass diese ECU am Bus lebt, und hilft bei Verkabelungsfehlern.
-    // Standardmaessig aus, damit die simulierte ECU sich "sauber" verhaelt.
+    // Heartbeat (1 Hz frame on 0x555) + TWAI status over Serial - shows the test
+    // partner that this ECU is alive on the bus, and helps with wiring faults.
+    // Off by default so the simulated ECU behaves "cleanly".
     if (millis() - lastHeartbeat > 1000) {
         lastHeartbeat = millis();
         twai_status_info_t st{};
@@ -335,9 +336,9 @@ void loop() {
     Serial.println("]");
 #endif
 
-    // Nur auf funktionale (0x7DF) oder direkt an uns gerichtete (0x7E0)
-    // Anfragen reagieren - Flow-Control-Frames (0x30) werden separat in
-    // waitForFlowControl() behandelt und hier ignoriert.
+    // Only react to functional (0x7DF) or directly addressed (0x7E0) requests -
+    // Flow Control frames (0x30) are handled separately in waitForFlowControl()
+    // and ignored here.
     if (msg.identifier != OBD_REQUEST_ID && msg.identifier != OBD_MY_REQUEST_ID) {
         return;
     }
@@ -345,7 +346,7 @@ void loop() {
         return;
     }
     if ((msg.data[0] & 0xF0) == 0x30) {
-        return; // Flow-Control, gehoert nicht hierher
+        return; // Flow Control, does not belong here
     }
 
     uint8_t service = msg.data[1];
@@ -367,7 +368,7 @@ void loop() {
             }
             break;
         default:
-            Serial.printf("Unbekannter Service 0x%02X ignoriert\n", service);
+            Serial.printf("unknown service 0x%02X ignored\n", service);
             break;
     }
 }

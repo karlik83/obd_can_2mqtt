@@ -21,10 +21,10 @@
 #include <ExprParser.h>
 #include "helper.h"
 
-// Hinweis: "elm327" ist im USE_CAN-Build KEIN ELMduino-Objekt mehr, sondern
-// die kompatible CAN-Bridge aus obd_can.h/.cpp - alle Aufrufe unten
-// (currentDTCCodes(), nb_rx_state, DTC_Response, batteryVoltage(), ...)
-// funktionieren unveraendert, da die Klasse dieselbe Schnittstelle bietet.
+// Note: in the USE_CAN build "elm327" is NOT an ELMduino object any more, but
+// the compatible CAN bridge from obd_can.h/.cpp - all calls below
+// (currentDTCCodes(), nb_rx_state, DTC_Response, batteryVoltage(), ...) work
+// unchanged because the class offers the same interface.
 OBDClass::OBDClass() : OBDStates(&elm327), elm327() {
     protocol = AUTOMATIC;
 
@@ -523,8 +523,8 @@ void OBDClass::connect(bool reconnect) {
         return;
     }
 
-    // Kein Geraete-Pairing wie bei Bluetooth noetig - einfach den TWAI-
-    // Treiber (neu) starten. Bei Fehlschlag mit Backoff erneut versuchen.
+    // No device pairing like Bluetooth needed - just (re)start the TWAI
+    // driver. On failure retry with a backoff.
     int retryCount = 0;
     while (!elm327.begin() && retryCount < 3) {
         Serial.println("Couldn't start CAN interface - retrying");

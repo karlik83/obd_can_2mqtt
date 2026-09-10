@@ -17,19 +17,16 @@
 //
 // obd_can.h
 //
-// Drop-in-Ersatz fuer ELMduino's ELM327-Klasse, der aber nicht mit einem
-// externen ELM327-Chip per Bluetooth spricht, sondern den ESP32-eigenen
-// TWAI-Controller (CAN) direkt nutzt und OBD2/ISO-15765-Anfragen selbst
-// aufbaut und zusammensetzt.
+// Drop-in replacement for ELMduino's ELM327 class that does not talk to an
+// external ELM327 chip over Bluetooth, but uses the ESP32's own TWAI (CAN)
+// controller directly and builds/reassembles OBD2 / ISO-15765 requests itself.
 //
-// WICHTIG: Diese Klasse heisst bewusst genauso wie die ELMduino-Klasse
-// (ELM327) und bietet dieselben von OBDState.cpp/OBDStates.cpp/obd.cpp
-// verwendeten Member. Dadurch muessen OBDState.h/OBDStates.h NICHT
-// angepasst werden - dort wird lediglich zwischen
-//   #include <ELMduino.h>      (Bluetooth-Variante)
-// und
-//   #include "obd_can.h"       (USE_CAN, diese Datei)
-// umgeschaltet.
+// IMPORTANT: this class is deliberately named exactly like the ELMduino class
+// (ELM327) and offers the same members used by OBDState.cpp/OBDStates.cpp/obd.cpp.
+// That way OBDState.h/OBDStates.h do NOT need changes - they only switch between
+//   #include <ELMduino.h>      (Bluetooth variant)
+// and
+//   #include "obd_can.h"       (USE_CAN, this file)
 #pragma once
 
 #ifndef OBD2_MQTT_OBD_CAN_H
@@ -41,10 +38,9 @@
 #include "obd_can_config.h"
 
 // ---------------------------------------------------------------------
-// Status-Codes, kompatibel zu den in OBDState.cpp/obd.cpp verwendeten
-// ELMduino-Konstanten (ELM_SUCCESS / ELM_NO_DATA / ELM_GETTING_MSG).
-// Weitere Werte sind rein intern und werden vom bestehenden Code nicht
-// abgefragt.
+// Status codes, compatible with the ELMduino constants used in
+// OBDState.cpp/obd.cpp (ELM_SUCCESS / ELM_NO_DATA / ELM_GETTING_MSG).
+// The other values are purely internal and not read by the existing code.
 // ---------------------------------------------------------------------
 typedef enum {
     ELM_SUCCESS = 0,
@@ -56,23 +52,21 @@ typedef enum {
     ELM_GENERAL_ERROR
 } elm_can_rxstate_t;
 
-// AUTOMATIC/-Protokoll-Konstante, wird von obd.cpp/Settings als Default
-// verwendet (protocol-Parameter von begin()/OBDClass). Im CAN-Modus ohne
-// Bedeutung, muss aber als Symbol existieren, da main.cpp/settings.cpp
-// weiterhin "AUTOMATIC" referenzieren.
+// AUTOMATIC protocol constant, used by obd.cpp/Settings as the default (the
+// protocol parameter of begin()/OBDClass). Meaningless in CAN mode, but the
+// symbol must exist because main.cpp/settings.cpp still reference "AUTOMATIC".
 #ifndef AUTOMATIC
 #define AUTOMATIC '0'
 #endif
 
-// Von OBDState.cpp fuer das (im CAN-Modus ungenutzte) Header-Handling
-// referenzierte Makros/Strings - muessen nur existieren, damit der Code
-// unveraendert compiliert.
+// Macros/strings referenced by OBDState.cpp for the (unused in CAN mode) header
+// handling - they only need to exist so the code compiles unchanged.
 #define SET_HEADER            "AT SH %s"
 #define SET_ALL_TO_DEFAULTS   "AT D"
 #define RESPONSE_OK            "OK"
 
-// In ELMduino.h definiert; OBDState.cpp nutzt es zur Gruppierung der
-// "supported PIDs"-Abfragen (0x00/0x20/0x40/...).
+// Defined in ELMduino.h; OBDState.cpp uses it to group the "supported PIDs"
+// queries (0x00/0x20/0x40/...).
 #ifndef PID_INTERVAL_OFFSET
 #define PID_INTERVAL_OFFSET   0x20
 #endif
@@ -80,8 +74,8 @@ typedef enum {
 #define OBD_CAN_MAX_DTC        16
 #define OBD_CAN_PAYLOAD_LEN    64
 
-// Kompatibel zu ELMduino's DTC_Response-Struct (codesFound / codes[i]),
-// siehe obd.cpp: elm327.DTC_Response.codesFound / .codes[i]
+// Compatible with ELMduino's DTC_Response struct (codesFound / codes[i]),
+// see obd.cpp: elm327.DTC_Response.codesFound / .codes[i]
 struct DTCResponseCompat {
     uint8_t codesFound = 0;
     std::string codes[OBD_CAN_MAX_DTC];
@@ -89,13 +83,13 @@ struct DTCResponseCompat {
 
 class ELM327 {
 public:
-    // --- Von OBDState.cpp / OBDStates.cpp / obd.cpp gelesene Member ---
+    // --- Members read by OBDState.cpp / OBDStates.cpp / obd.cpp ---
     elm_can_rxstate_t nb_rx_state = ELM_GETTING_MSG;
     bool connected = false;
     bool specifyNumResponses = true;
 
-    // Nur als Truthy-Check verwendet (OBDState.cpp:403, OBDStates.cpp:182)
-    // -> zeigt an, ob die CAN-Schnittstelle initialisiert ist.
+    // Only used as a truthy check (OBDState.cpp:403, OBDStates.cpp:182)
+    // -> indicates whether the CAN interface is initialized.
     void *elm_port = nullptr;
 
     static const uint16_t PAYLOAD_LEN = OBD_CAN_PAYLOAD_LEN;
@@ -105,23 +99,23 @@ public:
 
     ELM327();
 
-    // --- Init / Verbindung ---
-    // Ersetzt elm327.begin(stream, debug, timeout, protocol) der Bluetooth-
-    // Variante. Wird aus obd.cpp (USE_CAN-Zweig) mit den Pins aus
-    // obd_can_config.h aufgerufen.
+    // --- Init / connection ---
+    // Replaces elm327.begin(stream, debug, timeout, protocol) of the Bluetooth
+    // variant. Called from obd.cpp (USE_CAN branch) with the pins from
+    // obd_can_config.h.
     bool begin(gpio_num_t txPin = OBD_CAN_TX_PIN, gpio_num_t rxPin = OBD_CAN_RX_PIN,
                bool debug = false, uint32_t timeoutMs = OBD_CAN_RESPONSE_TIMEOUT_MS);
 
     void end();
 
-    // --- Kernfunktion, von jedem OBDState::readValue() aufgerufen ---
-    // (siehe OBDState.cpp:126,434,438)
+    // --- Core function, called from every OBDState::readValue() ---
+    // (see OBDState.cpp:126,434,438)
     double processPID(uint8_t service, uint16_t pid, uint8_t numResponses,
                        uint8_t numExpectedBytes, double scaleFactor = 1, double bias = 0);
 
-    // Wird in OBDState.cpp fuer AT-Header-Kommandos aufgerufen. Im CAN-Modus
-    // gibt es keine AT-Kommandos mehr - liefert daher immer ELM_SUCCESS mit
-    // leerem Payload, damit der bestehende Ablauf nicht blockiert.
+    // Called from OBDState.cpp for AT header commands. In CAN mode there are no
+    // more AT commands - so it always returns ELM_SUCCESS with an empty payload
+    // so the existing flow does not block.
     elm_can_rxstate_t sendCommand_Blocking(const char *cmd);
 
     // --- Diagnostic Trouble Codes (Service 0x03/0x04) ---
@@ -129,11 +123,11 @@ public:
 
     bool resetDTC();
 
-    // Standard-ELM327-AT-Kommando "AT RV" liest die Versorgungsspannung am
-    // OBD-Stecker direkt am Adapter-Pin - das gibt es ohne ELM327-Chip nicht.
-    // Ersatzweise wird PID 0x42 (Control Module Voltage) abgefragt, was auf
-    // den allermeisten Fahrzeugen verfuegbar ist, aber nur bei aktiver
-    // Steuergeraete-Kommunikation funktioniert (nicht bei Zuendung aus).
+    // The standard ELM327 AT command "AT RV" reads the supply voltage right at
+    // the OBD connector pin of the adapter - which does not exist without an
+    // ELM327 chip. As a substitute PID 0x42 (Control Module Voltage) is queried,
+    // which is available on most vehicles but only works while the ECUs are
+    // communicating (not with the ignition off).
     double batteryVoltage();
 
 private:
@@ -143,13 +137,13 @@ private:
 
     bool sendFrame(uint32_t id, const uint8_t *data, uint8_t len) const;
 
-    // Sendet eine OBD2-Anfrage (Service+PID) und liefert die vollstaendig
-    // zusammengesetzte Antwort (nach ISO-TP-Reassembly) inkl. der beiden
-    // Echo-Bytes (Service+0x40, PID) am Anfang.
+    // Sends an OBD2 request (service+PID) and returns the fully reassembled
+    // response (after ISO-TP reassembly) including the two echo bytes
+    // (service+0x40, PID) at the front.
     bool requestPID(uint8_t service, uint16_t pid, uint8_t *outData, uint8_t &outLen);
 
-    // Nimmt solange Frames entgegen, bis entweder eine vollstaendige
-    // ISO-TP-Nachricht zusammengesetzt wurde oder der Timeout erreicht ist.
+    // Keeps receiving frames until either a complete ISO-TP message has been
+    // reassembled or the timeout is reached.
     bool receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLen);
 
     static std::string decodeDTC(uint8_t b1, uint8_t b2);

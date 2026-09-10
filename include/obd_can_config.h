@@ -5,18 +5,18 @@
 //
 // obd_can_config.h
 //
-// Board-spezifische Einstellungen fuer die native CAN-Anbindung (USE_CAN).
-// Werte hier oder per build_flags (-D OBD_CAN_TX_PIN=xx) ueberschreiben,
-// falls die gewaehlten Pins mit dem Modem/GPS/SD-Interface deines Boards
-// kollidieren (siehe device_sim7xxx.h / device_simA76xx.h fuer belegte Pins).
+// Board-specific settings for the native CAN connection (USE_CAN).
+// Override values here or via build_flags (-D OBD_CAN_TX_PIN=xx) if the chosen
+// pins clash with the modem/GPS/SD interface of your board (see
+// device_sim7xxx.h / device_simA76xx.h for the pins already in use).
 
 #pragma once
 
 #ifndef OBD2_MQTT_OBD_CAN_CONFIG_H
 #define OBD2_MQTT_OBD_CAN_CONFIG_H
 
-// Getestet als frei auf T-SIM7070G / T-SIM7000G OHNE SimShield.
-// SimShield-Nutzer: GPIO32 kollidiert mit SIMSHIELD_SD_CS, dann verschieben!
+// Tested as free on T-SIM7070G / T-SIM7000G WITHOUT a SimShield.
+// SimShield users: GPIO32 clashes with SIMSHIELD_SD_CS, move it then!
 #ifndef OBD_CAN_TX_PIN
 #define OBD_CAN_TX_PIN          GPIO_NUM_32
 #endif
@@ -25,15 +25,15 @@
 #define OBD_CAN_RX_PIN          GPIO_NUM_33
 #endif
 
-// Die allermeisten Fahrzeuge (inkl. VW MQB-Plattform, z.B. e-Golf) nutzen
-// am OBD2-Diagnose-Gateway 500 kBit/s mit 11-Bit-Identifiern (ISO 15765-4).
-// Falls dein Fahrzeug 29-Bit-IDs oder eine andere Baudrate nutzt, hier anpassen.
+// The vast majority of vehicles (incl. the VW MQB platform, e.g. e-Golf) use
+// 500 kBit/s with 11-bit identifiers (ISO 15765-4) at the OBD2 diagnostic
+// gateway. Adjust here if your vehicle uses 29-bit IDs or a different baud rate.
 #ifndef OBD_CAN_USE_EXTENDED_ID
 #define OBD_CAN_USE_EXTENDED_ID  0
 #endif
 
-// Bus-Bitrate in kBit/s. ISO 15765-4 kennt 250 und 500; nahezu alle PKW nutzen
-// 500. 125 nur als Diagnose-Hilfe bei zickiger Verkabelung (langsamere Flanken).
+// Bus bitrate in kBit/s. ISO 15765-4 allows 250 and 500; almost all cars use
+// 500. Use 125 only as a diagnostic aid for a flaky harness (slower edges).
 #ifndef OBD_CAN_BITRATE_KBPS
 #define OBD_CAN_BITRATE_KBPS     500
 #endif
@@ -45,15 +45,15 @@
 #elif OBD_CAN_BITRATE_KBPS == 125
 #define OBD_CAN_TIMING_CONFIG    TWAI_TIMING_CONFIG_125KBITS()
 #else
-#error "OBD_CAN_BITRATE_KBPS: nur 125, 250 oder 500 unterstuetzt"
+#error "OBD_CAN_BITRATE_KBPS: only 125, 250 or 500 are supported"
 #endif
 
-// Standard-OBD2-Adressierung (ISO 15765-4)
-#define OBD_CAN_REQUEST_ID       0x7DF   // funktionale Anfrage (Broadcast an alle ECUs)
-#define OBD_CAN_RESPONSE_ID_MIN  0x7E8   // erste moegliche ECU-Antwort-ID
-#define OBD_CAN_RESPONSE_ID_MAX  0x7EF   // letzte moegliche ECU-Antwort-ID
+// Standard OBD2 addressing (ISO 15765-4)
+#define OBD_CAN_REQUEST_ID       0x7DF   // functional request (broadcast to all ECUs)
+#define OBD_CAN_RESPONSE_ID_MIN  0x7E8   // first possible ECU response ID
+#define OBD_CAN_RESPONSE_ID_MAX  0x7EF   // last possible ECU response ID
 
-// Timeouts / Retry-Verhalten
+// Timeouts / retry behaviour
 #ifndef OBD_CAN_RESPONSE_TIMEOUT_MS
 #define OBD_CAN_RESPONSE_TIMEOUT_MS   1000
 #endif

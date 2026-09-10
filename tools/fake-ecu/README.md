@@ -1,51 +1,51 @@
 # fake-ecu
 
-Standalone-Testfirmware: simuliert eine Fahrzeug-ECU am CAN-Bus, damit
-`src/obd_can.cpp` (natives CAN, `-DUSE_CAN`) **ohne echtes Auto** getestet
-werden kann.
+Standalone test firmware: simulates a vehicle ECU on the CAN bus so that
+`src/obd_can.cpp` (native CAN, `-DUSE_CAN`) can be tested **without a real car**.
 
 ## Hardware
 
-- 2. Board: LilyGO **T7-S3** (ESP32-S3-WROOM-1-N16R8) + CAN-Transceiver
-- CAN-Pins auf dem Testboard: **TX = GPIO13**, **RX = GPIO14** (in `src/main.cpp`)
-- Verkabelung zum obd_can_2mqtt-Board:
+- 2nd board: LilyGO **T7-S3** (ESP32-S3-WROOM-1-N16R8) + CAN transceiver
+- CAN pins on the test board: **TX = GPIO13**, **RX = GPIO14** (in `src/main.cpp`)
+- Wiring to the obd_can_2mqtt board:
   - CAN-H ↔ CAN-H, CAN-L ↔ CAN-L, **GND ↔ GND**
-  - **120 Ω** zwischen CAN-H/CAN-L an **beiden** Enden → Multimeter über den Bus misst ~60 Ω
+  - **120 Ω** between CAN-H/CAN-L at **both** ends → a multimeter across the bus reads ~60 Ω
 
-> **Transceiver:** die billigen **CJMCU-230** funktionieren erfahrungsgemäß nicht
-> zuverlässig (schwacher Treiber, "nur Empfang"). Getestet und gut:
-> **Waveshare "SN65HVD230 CAN Board"** (Terminierungs-Jumper an Bord, Rs korrekt).
-> Board `CAN_TX` → ESP-TX-GPIO, `CAN_RX` → ESP-RX-GPIO.
+> **Transceiver:** the cheap **CJMCU-230** boards do not work reliably (weak
+> driver, "receive only"). Tested and good: **Waveshare "SN65HVD230 CAN Board"**
+> (onboard termination jumper, Rs wired correctly).
+> Board `CAN_TX` → ESP TX GPIO, `CAN_RX` → ESP RX GPIO. Keep the termination
+> jumper set on both boards; do **not** add extra resistors.
 
-## Bauen & Flashen
+## Build & flash
 
 ```
 pio run -e fake-ecu -t upload --upload-port COM5
-pio device monitor -e fake-ecu -p COM5        # Log ansehen, dann Reset druecken
+pio device monitor -e fake-ecu -p COM5        # view the log, then press reset
 ```
 
-Der Log (`=== Fake-ECU startet ===`, `SELBSTTEST: ...`, `CAN-Bus bereit ...`) laeuft
-ueber den nativen USB-Port (USB-CDC, siehe `ARDUINO_USB_CDC_ON_BOOT=1` in `platformio.ini`).
+The log (`=== Fake ECU starting ===`, `SELFTEST: ...`, `CAN bus ready ...`) runs
+over the native USB port (USB-CDC, see `ARDUINO_USB_CDC_ON_BOOT=1` in `platformio.ini`).
 
-### Build-Flags (optional)
+### Build flags (optional)
 
-| Flag | Wirkung |
+| Flag | Effect |
 |---|---|
-| `-DFAKE_ECU_BITRATE_KBPS=125\|250\|500` | Bus-Bitrate (Default 500), muss zu `OBD_CAN_BITRATE_KBPS` des Testpartners passen |
-| `-DFAKE_ECU_DEBUG` | 1-Hz-Heartbeat auf `0x555` + TWAI-Status + Roh-Frame-Log über Serial (Default aus) |
-| `-DFAKE_ECU_NO_ACK` | `TWAI_MODE_NO_ACK` – empfängt, bestätigt aber nicht (Bus-Diagnose) |
+| `-DFAKE_ECU_BITRATE_KBPS=125\|250\|500` | bus bitrate (default 500), must match `OBD_CAN_BITRATE_KBPS` of the test partner |
+| `-DFAKE_ECU_DEBUG` | 1 Hz heartbeat on `0x555` + TWAI status + raw frame log over Serial (off by default) |
+| `-DFAKE_ECU_NO_ACK` | `TWAI_MODE_NO_ACK` – receives but does not acknowledge (bus diagnostics) |
 
-Der einmalige CAN-**Selbsttest** beim Boot (Loopback über den Transceiver) läuft
-immer und meldet `SELBSTTEST: OK` bzw. `FEHLGESCHLAGEN`.
+The one-shot CAN **self-test** at boot (loopback through the transceiver) always
+runs and reports `SELFTEST: OK` or `SELFTEST: FAILED`.
 
-## Was simuliert wird
+## What is simulated
 
-| Anfrage | Antwort |
+| Request | Response |
 |---|---|
-| Service 0x01 PID 0x0C / 0x0D / 0x05 / 0x11 / 0x42 | RPM (800–3000, pendelnd), Speed, Kühlmitteltemp, Drossel, 13.8 V |
-| Service 0x09 PID 0x02 | VIN `WVWZZZ1KZAW123456` als **Multi-Frame** (testet ISO-TP + Flow Control) |
+| Service 0x01 PID 0x0C / 0x0D / 0x05 / 0x11 / 0x42 | RPM (800–3000, sweeping), speed, coolant temp, throttle, 13.8 V |
+| Service 0x09 PID 0x02 | VIN `WVWZZZ1KZAW123456` as a **multi-frame** response (exercises ISO-TP + Flow Control) |
 | Service 0x03 | 2 DTCs: P0301, P0420 |
-| Service 0x04 | positive Quittung (DTCs gelöscht) |
-| unbekannte PID | Negative Response 0x7F ... 0x12 |
+| Service 0x04 | positive acknowledgement (DTCs cleared) |
+| unknown PID | Negative Response 0x7F ... 0x12 |
 
-Request-IDs: `0x7DF` (funktional) und `0x7E0` (physisch), Antwort: `0x7E8`, 500 kBit/s, 11-Bit.
+Request IDs: `0x7DF` (functional) and `0x7E0` (physical), response: `0x7E8`, 500 kBit/s, 11-bit.

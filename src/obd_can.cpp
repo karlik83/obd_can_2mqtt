@@ -14,8 +14,8 @@
  * If not, write to the Free Software Foundation Inc.,
  * 59 Temple Place - Suite 330, Boston, MA  02111-1307 USA
  */
-// Nur im nativen CAN-Build uebersetzen. Sonst kollidiert die hier definierte
-// ELM327-Klasse beim Linken mit der gleichnamigen Klasse aus der ELMduino-Lib.
+// Only compile in the native CAN build. Otherwise the ELM327 class defined here
+// collides at link time with the identically named class from the ELMduino lib.
 #ifdef USE_CAN
 
 #include "obd_can.h"
@@ -25,10 +25,9 @@ ELM327::ELM327() {
 }
 
 #ifdef OBD_CAN_DEBUG
-// Lokaler Loopback-Selbsttest: im NO_ACK-Modus einen Frame mit Self-Reception
-// senden. Er laeuft ESP-TX -> Transceiver -> CANH/CANL -> Transceiver -> ESP-RX.
-// Kommt er zurueck, ist die lokale CAN-Hardware (Pins, Transceiver, Rs, Power)
-// in Ordnung.
+// Local loopback self-test: send a frame with self-reception in NO_ACK mode.
+// It runs ESP-TX -> transceiver -> CANH/CANL -> transceiver -> ESP-RX.
+// If it comes back, the local CAN hardware (pins, transceiver, Rs, power) is ok.
 static void obdCanSelfTest(gpio_num_t txPin, gpio_num_t rxPin) {
     twai_stop();
     twai_driver_uninstall();
@@ -55,7 +54,7 @@ static void obdCanSelfTest(gpio_num_t txPin, gpio_num_t rxPin) {
     twai_status_info_t st{};
     twai_get_status_info(&st);
     Serial.printf("obd_can: SELFTEST %s (busErr=%lu txErr=%lu)\n",
-                  got ? "OK - lokale CAN-HW funktioniert" : "FAILED - Transceiver/Rs/Power/Pins pruefen",
+                  got ? "OK - local CAN HW works" : "FAILED - check transceiver/Rs/power/pins",
                   (unsigned long) st.bus_error_count, (unsigned long) st.tx_error_counter);
     twai_stop();
     twai_driver_uninstall();
@@ -70,10 +69,10 @@ bool ELM327::begin(gpio_num_t txPin, gpio_num_t rxPin, bool debugEnabled, uint32
     obdCanSelfTest(txPin, rxPin);
 #endif
 
-    // OBD_CAN_LISTEN_TEST: NO_ACK-Modus - der Controller bestaetigt empfangene
-    // Frames NICHT, empfaengt sie aber weiterhin. Zusammen mit OBD_CAN_DEBUG
-    // (Roh-Frame-Log in receiveIsoTp) laesst sich so pruefen, ob Frames der
-    // Gegenstelle physisch ankommen, unabhaengig vom ACK-Handshake.
+    // OBD_CAN_LISTEN_TEST: NO_ACK mode - the controller does NOT acknowledge
+    // received frames, but still receives them. Together with OBD_CAN_DEBUG
+    // (raw frame log in receiveIsoTp) this lets you check whether the peer's
+    // frames physically arrive, independent of the ACK handshake.
 #ifdef OBD_CAN_LISTEN_TEST
     const twai_mode_t canMode = TWAI_MODE_NO_ACK;
 #else
@@ -83,8 +82,8 @@ bool ELM327::begin(gpio_num_t txPin, gpio_num_t rxPin, bool debugEnabled, uint32
     twai_timing_config_t t_config = OBD_CAN_TIMING_CONFIG;
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-    // Falls von einem vorherigen (fehlgeschlagenen) begin() noch ein Treiber
-    // installiert ist, sauber aufraeumen, bevor neu initialisiert wird.
+    // In case a driver from a previous (failed) begin() is still installed,
+    // clean up before re-initializing.
     twai_stop();
     twai_driver_uninstall();
 
@@ -104,8 +103,8 @@ bool ELM327::begin(gpio_num_t txPin, gpio_num_t rxPin, bool debugEnabled, uint32
 
     initialized = true;
     connected = true;
-    // Truthy-Marker fuer die elm_port-Checks in OBDState.cpp/OBDStates.cpp -
-    // es wird nie dereferenziert, nur auf != nullptr geprueft.
+    // Truthy marker for the elm_port checks in OBDState.cpp/OBDStates.cpp -
+    // it is never dereferenced, only checked for != nullptr.
     elm_port = reinterpret_cast<void *>(0x1);
 
     Serial.println("obd_can: TWAI (CAN) driver started");
@@ -129,7 +128,7 @@ bool ELM327::sendFrame(const uint32_t id, const uint8_t *data, const uint8_t len
     message.data_length_code = 8;
 
     for (int i = 0; i < 8; i++) {
-        // ISO-15765-Padding mit 0x00 fuer ungenutzte Bytes.
+        // ISO-15765 padding with 0x00 for unused bytes.
         message.data[i] = i < len ? data[i] : 0x00;
     }
 
@@ -158,7 +157,7 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
 #endif
 
         if (message.identifier < OBD_CAN_RESPONSE_ID_MIN || message.identifier > OBD_CAN_RESPONSE_ID_MAX) {
-            continue; // nicht relevanter Bus-Traffic
+            continue; // not relevant bus traffic
         }
 
         if (message.data_length_code == 0) {
@@ -169,7 +168,7 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
         const uint8_t frameType = (pci & 0xF0) >> 4;
 
         if (frameType == 0x0) {
-            // Single Frame: laenge steckt im unteren Nibble von PCI
+            // Single Frame: length is in the lower nibble of the PCI
             const uint8_t len = pci & 0x0F;
             if (len == 0 || len > 7) continue;
 
@@ -180,18 +179,18 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
         }
 
         if (frameType == 0x1) {
-            // First Frame einer Multi-Frame-Nachricht
+            // First Frame of a multi-frame message
             totalLen = ((pci & 0x0F) << 8) | message.data[1];
             if (totalLen == 0 || totalLen > OBD_CAN_PAYLOAD_LEN) continue;
 
-            received = 6; // 6 Datenbytes stecken bereits im First Frame
+            received = 6; // 6 data bytes are already in the First Frame
             memcpy(outData, &message.data[2], 6);
             firstFrameSeen = true;
             expectedSeq = 1;
             responseId = message.identifier;
 
-            // Flow-Control-Frame an die passende Request-ID der antwortenden
-            // ECU senden (Response-ID - 8 == zugehoerige Request-ID).
+            // Send a Flow Control frame to the matching request ID of the
+            // responding ECU (response ID - 8 == its request ID).
             const uint8_t fc[8] = {0x30, 0x00, 0x00, 0, 0, 0, 0, 0};
             sendFrame(message.identifier - 8, fc, 3);
             continue;
@@ -201,7 +200,7 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
             // Consecutive Frame
             const uint8_t seq = pci & 0x0F;
             if (seq != (expectedSeq & 0x0F)) {
-                // Sequenz passt nicht (verlorenes Frame o.ae.) - abbrechen
+                // Sequence mismatch (lost frame or similar) - abort
                 return false;
             }
 
@@ -219,12 +218,12 @@ bool ELM327::receiveIsoTp(uint32_t &responseId, uint8_t *outData, uint8_t &outLe
         }
     }
 
-    return false; // Timeout
+    return false; // timeout
 }
 
 bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outData, uint8_t &outLen) {
-    // Mode/Service-Requests mit einem PID-Byte (Standard-Fall fuer Mode 01,
-    // 02, 09 ...). Service 0x03/0x04 (DTCs) nutzen currentDTCCodes()/resetDTC().
+    // Mode/service requests with one PID byte (the standard case for mode 01,
+    // 02, 09 ...). Service 0x03/0x04 (DTCs) use currentDTCCodes()/resetDTC().
     const uint8_t request[8] = {
         0x02, service, static_cast<uint8_t>(pid & 0xFF), 0, 0, 0, 0, 0
     };
@@ -260,9 +259,9 @@ bool ELM327::requestPID(const uint8_t service, const uint16_t pid, uint8_t *outD
     Serial.println("]");
 #endif
 
-    // Erwartete positive Antwort: Byte0 = service+0x40 (Echo), Byte1 = PID
+    // Expected positive response: byte0 = service+0x40 (echo), byte1 = PID
     if (rawLen < 2 || raw[0] != static_cast<uint8_t>(service + 0x40)) {
-        // Byte0 == 0x7F bedeutet "Negative Response" (z.B. PID nicht unterstuetzt)
+        // byte0 == 0x7F means "Negative Response" (e.g. PID not supported)
         nb_rx_state = ELM_NO_DATA;
         return false;
     }
@@ -284,15 +283,15 @@ double ELM327::processPID(const uint8_t service, const uint16_t pid, const uint8
         return 0;
     }
 
-    // Rohantwort (hex) im payload-Puffer ablegen - wird u.a. fuer
-    // Expression-Auswertung ($payload) und Diagnose-Ausgabe genutzt.
+    // Store the raw response (hex) in the payload buffer - used e.g. for
+    // expression evaluation ($payload) and diagnostic output.
     size_t pos = 0;
     for (int i = 0; i < rawLen && pos + 2 < sizeof(payload); i++) {
         pos += snprintf(payload + pos, sizeof(payload) - pos, "%02X", raw[i]);
     }
     payload[pos] = '\0';
 
-    // Nutzdaten beginnen nach den zwei Echo-Bytes (Service+0x40, PID)
+    // The payload starts after the two echo bytes (service+0x40, PID)
     const uint8_t *data = raw + 2;
     const uint8_t dataLen = rawLen >= 2 ? rawLen - 2 : 0;
     const uint8_t useLen = numExpectedBytes < dataLen ? numExpectedBytes : dataLen;
@@ -307,10 +306,10 @@ double ELM327::processPID(const uint8_t service, const uint16_t pid, const uint8
 }
 
 elm_can_rxstate_t ELM327::sendCommand_Blocking(const char *cmd) {
-    // Im CAN-Modus gibt es keine AT-Kommandos (Header setzen etc.) mehr.
-    // Wird von OBDState.cpp nur fuer optionale Header-Konfiguration
-    // aufgerufen - dort einfach als Erfolg quittieren, damit der bestehende
-    // Ablauf (SET_HEADER / SET_ALL_TO_DEFAULTS) nicht blockiert.
+    // In CAN mode there are no more AT commands (setting headers etc.).
+    // OBDState.cpp only calls this for optional header configuration - just
+    // acknowledge success here so the existing flow (SET_HEADER /
+    // SET_ALL_TO_DEFAULTS) does not block.
     (void) cmd;
     strlcpy(payload, RESPONSE_OK, sizeof(payload));
     nb_rx_state = ELM_SUCCESS;
@@ -318,7 +317,7 @@ elm_can_rxstate_t ELM327::sendCommand_Blocking(const char *cmd) {
 }
 
 std::string ELM327::decodeDTC(const uint8_t b1, const uint8_t b2) {
-    // SAE-J2012-Kodierung: die oberen 2 Bit von b1 bestimmen das Praefix.
+    // SAE J2012 encoding: the top 2 bits of b1 determine the prefix.
     static const char prefixes[4] = {'P', 'C', 'B', 'U'};
     const char prefix = prefixes[(b1 >> 6) & 0x03];
     const uint8_t digit1 = (b1 >> 4) & 0x03;
@@ -329,7 +328,7 @@ std::string ELM327::decodeDTC(const uint8_t b1, const uint8_t b2) {
 }
 
 void ELM327::currentDTCCodes() {
-    // Service 0x03: gespeicherte DTCs auslesen (kein PID-Byte noetig)
+    // Service 0x03: read stored DTCs (no PID byte needed)
     const uint8_t request[8] = {0x01, 0x03, 0, 0, 0, 0, 0, 0};
 
     DTC_Response.codesFound = 0;
@@ -348,14 +347,14 @@ void ELM327::currentDTCCodes() {
         return;
     }
 
-    // raw[1] = Anzahl DTCs, danach folgen Paare aus je 2 Byte pro Code
+    // raw[1] = number of DTCs, followed by 2-byte pairs per code
     const uint8_t count = rawLen >= 2 ? raw[1] : 0;
     const uint8_t maxCodes = count < OBD_CAN_MAX_DTC ? count : OBD_CAN_MAX_DTC;
 
     for (int i = 0; i < maxCodes; i++) {
         const int off = 2 + i * 2;
         if (off + 1 >= rawLen) break;
-        if (raw[off] == 0 && raw[off + 1] == 0) continue; // Leercode ueberspringen
+        if (raw[off] == 0 && raw[off + 1] == 0) continue; // skip empty code
 
         DTC_Response.codes[DTC_Response.codesFound++] = decodeDTC(raw[off], raw[off + 1]);
     }
@@ -364,7 +363,7 @@ void ELM327::currentDTCCodes() {
 }
 
 bool ELM327::resetDTC() {
-    // Service 0x04: alle gespeicherten DTCs loeschen
+    // Service 0x04: clear all stored DTCs
     const uint8_t request[8] = {0x01, 0x04, 0, 0, 0, 0, 0, 0};
 
     if (!sendFrame(OBD_CAN_REQUEST_ID, request, 1)) {
@@ -375,13 +374,13 @@ bool ELM327::resetDTC() {
     uint8_t raw[OBD_CAN_PAYLOAD_LEN] = {0};
     uint8_t rawLen = 0;
 
-    // Positive Antwort auf Service 0x04 ist 0x44 (kein weiterer Payload)
+    // The positive response to service 0x04 is 0x44 (no further payload)
     return receiveIsoTp(responseId, raw, rawLen) && rawLen >= 1 && raw[0] == 0x44;
 }
 
 double ELM327::batteryVoltage() {
-    // Ersatz fuer "AT RV" (ELM327-eigene ADC-Messung am OBD-Pin 16):
-    // PID 0142 "Control module voltage", Formel laut SAE J1979: ((A*256)+B)/1000
+    // Substitute for "AT RV" (the ELM327's own ADC measurement on OBD pin 16):
+    // PID 0142 "Control module voltage", formula per SAE J1979: ((A*256)+B)/1000
     const double raw = processPID(0x01, 0x42, 1, 2, 1, 0);
     return raw / 1000.0;
 }
