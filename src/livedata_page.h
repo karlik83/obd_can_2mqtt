@@ -49,7 +49,7 @@ static const char LIVEDATA_HTML[] PROGMEM = R"HTMLPAGE(<!doctype html>
 </style>
 </head>
 <body>
-<header><h1>OBD Live Data &amp; Scanner</h1></header>
+<header><h1><a href="/" style="color:inherit;text-decoration:none">&#8592;</a> OBD Live Data &amp; Scanner</h1></header>
 <div class="tabs">
   <button id="tabLiveBtn" class="active" onclick="showTab('live')">Live</button>
   <button id="tabScanBtn" onclick="showTab('scan')">PID / DID Scan</button>

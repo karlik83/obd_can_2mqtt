@@ -27,6 +27,9 @@
             <li routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}">
                 <a routerLink="states">OBD</a>
             </li>
+            <li>
+                <a href="livedata" title="Live data & PID/DID scanner (firmware page)">Live</a>
+            </li>
             @if ((otaEnabled$ | async)) {
                 <li routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}">
                     <a routerLink="ota">OTA</a>
